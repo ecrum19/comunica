@@ -71,6 +71,8 @@ export class ActorQuerySourceIdentifyHypermediaSparql extends ActorQuerySourceId
       action.metadata.defaultGraph,
       action.metadata.unionDefaultGraph,
       action.metadata.datasets,
+      action.metadata.extensionFunctions,
+      action.metadata.postAccepted,
     );
     return { source };
   }

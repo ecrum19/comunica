@@ -68,7 +68,7 @@
     {
       "@id": "urn:comunica:default:optimize-query-operation/actors#prune-empty-source-operations",
       "@type": "ActorOptimizeQueryOperationPruneEmptySourceOperations",
-      "useAskIfSupported": false,
+      "useAskIfSupported": true,
       "beforeActors": [
         { "@id": "urn:comunica:default:optimize-query-operation/actors#filter-pushdown" }
       ]

@@ -146,6 +146,10 @@ export const KeysInitQuery = {
    */
   baseIRI: new ActionContextKey<string>('@comunica/actor-init-query:baseIRI'),
   /**
+   * The file's base IRI.
+   */
+  fileBaseIRI: new ActionContextKey<string>('@comunica/actor-init-query:fileBaseIRI'),
+  /**
    * Object to cache function argument overload resolutions.
    * Defaults to an object that is reused across query executions.
    */

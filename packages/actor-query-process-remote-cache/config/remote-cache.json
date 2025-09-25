@@ -28,6 +28,9 @@
         },
         "mediatorMergeBindingsContext": {
           "@id": "urn:comunica:default:merge-bindings-context/mediators#main"
+        },
+        "mediatorQueryResultSerialize": { 
+          "@id": "urn:comunica:default:query-result-serialize/mediators#serialize"
         }
       },
       "cacheHitAlgorithm": "all"

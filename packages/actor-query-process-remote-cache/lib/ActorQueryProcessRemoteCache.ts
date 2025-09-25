@@ -907,19 +907,15 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
   ): Promise<void> {
     // Try to clone the stream so we can both return and cache
     const original = (<IQueryOperationResultBindings>res.result).bindingsStream;
-    const returnStream = (original as any).clone
-      ? (original as any).clone()
-      : undefined;
-    const cacheStream = (original as any).clone
-      ? (original as any).clone()
-      : undefined;
+    const cacheStream = original.clone();
 
-    if (!returnStream || !cacheStream) {
-      this.logWarn(
-        action.context,
-        "BindingsStream.clone() not available; skipping JSON caching."
-      );
-    }
+    // if (!cacheStream) {
+    //   console.log("no clone");
+    //   this.logWarn(
+    //     action.context,
+    //     "BindingsStream.clone() not available; skipping JSON caching."
+    //   );
+    // }
 
     type SerializeBindingsHandle = IActionSparqlSerialize &
       IQueryOperationResultBindings;
@@ -949,30 +945,32 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
       await this.mediatorQueryResultSerialize.mediate(serializeAction);
 
     // Buffer JSON result
-    const jsonPromise = this.streamToString(serializeOutput.handle.data);
-
-    jsonPromise
-      .then(async (json) => {
-        const shouldSave = action.context.getSafe<boolean>(
-          KeyRemoteCache.saveToCache
-        );
-        if (shouldSave) {
-          try {
-            await this.saveToCache(json, action, provenance);
-          } catch (e) {
-            this.logWarn(
-              action.context,
-              `saveToCache failed: ${(e as Error).message}`
-            );
-          }
-        }
-      })
-      .catch((e) => {
-        this.logWarn(
-          action.context,
-          `SPARQL JSON serialization failed: ${(e as Error).message}`
-        );
-      });
+    const jsonPromise = await this.streamToString(serializeOutput.handle.data);
+    
+    console.log(jsonPromise);
+    // jsonPromise
+    //   .then(async (json) => {
+    //     console.log(json);
+    //     const shouldSave = action.context.getSafe<boolean>(
+    //       KeyRemoteCache.saveToCache
+    //     );
+    //     if (shouldSave) {
+    //       try {
+    //         // await this.saveToCache(json, action, provenance);
+    //       } catch (e) {
+    //         this.logWarn(
+    //           action.context,
+    //           `saveToCache failed: ${(e as Error).message}`
+    //         );
+    //       }
+    //     }
+    //   })
+    //   .catch((e) => {
+    //     this.logWarn(
+    //       action.context,
+    //       `SPARQL JSON serialization failed: ${(e as Error).message}`
+    //     );
+    //   });
   }
 
   private streamToString(stream: NodeJS.ReadableStream): Promise<string> {

@@ -909,13 +909,13 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
     const original = (<IQueryOperationResultBindings>res.result).bindingsStream;
     const cacheStream = original.clone();
 
-    // if (!cacheStream) {
-    //   console.log("no clone");
-    //   this.logWarn(
-    //     action.context,
-    //     "BindingsStream.clone() not available; skipping JSON caching."
-    //   );
-    // }im
+    if (!cacheStream) {
+      console.log("no clone");
+      this.logWarn(
+        action.context,
+        "BindingsStream.clone() not available; skipping JSON caching."
+      );
+    }
 
     type SerializeBindingsHandle = IActionSparqlSerialize &
       IQueryOperationResultBindings;
@@ -946,31 +946,20 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
 
     // Buffer JSON result
     const jsonPromise = await this.streamToString(serializeOutput.handle.data);
-    
-    console.log(jsonPromise);
-    // jsonPromise
-    //   .then(async (json) => {
-    //     console.log(json);
-    //     const shouldSave = action.context.getSafe<boolean>(
-    //       KeyRemoteCache.saveToCache
-    //     );
-    //     if (shouldSave) {
-    //       try {
-    //         // await this.saveToCache(json, action, provenance);
-    //       } catch (e) {
-    //         this.logWarn(
-    //           action.context,
-    //           `saveToCache failed: ${(e as Error).message}`
-    //         );
-    //       }
-    //     }
-    //   })
-    //   .catch((e) => {
-    //     this.logWarn(
-    //       action.context,
-    //       `SPARQL JSON serialization failed: ${(e as Error).message}`
-    //     );
-    //   });
+    const shouldSave = action.context.getSafe<boolean>(
+      KeyRemoteCache.saveToCache
+    );
+    // TODO: Solve equivalent query in cache case
+    if (shouldSave) {
+      try {
+        await this.saveToCache(jsonPromise, action, provenance);
+      } catch (e) {
+        this.logWarn(
+          action.context,
+          `saveToCache failed: ${(e as Error).message}`
+        );
+      }
+    }
   }
 
   private streamToString(stream: NodeJS.ReadableStream): Promise<string> {
@@ -992,8 +981,7 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
   ): Promise<void> {
     // Save to cache logic
     if (
-      action.context.getSafe<boolean>(KeyRemoteCache.saveToCache) === true &&
-      provenance !== Algorithm.CONTAINMENT
+      provenance !== Algorithm.EQ
     ) {
       // cache location
       const cacheLocation = action.context.getSafe(KeyRemoteCache.location);
@@ -1013,21 +1001,22 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
           endpoints.push(source.value);
         }
       }
-      if (await ensureCacheContainer(cacheLocation.toString())) {
-        // TODO: Check to make sure all this works ...
+      // actually save stuff
+      if (await ensureCacheContainer(cacheLocation)) {
+        console.log(`Saving query result to cache at: ${"url" in cacheLocation ? cacheLocation.url : cacheLocation.path}`);
         const hash = await updateQueriesTTL(
-          cacheLocation.toString(),
+          cacheLocation,
           queryString,
           endpoints
         );
-        await uploadQueryFile(cacheLocation.toString(), queryString, hash);
-
-        // TODO: FIX THIS MESS
-        await uploadResults(cacheLocation.toString(), result, hash);
+        await uploadQueryFile(cacheLocation, queryString, hash);
+        await uploadResults(cacheLocation, result, hash);
         console.log(`Saved query result to cache with hash: ${hash}`);
       } else {
         console.log(`Failed to save query result to cache`);
       }
+    } else {
+      console.log(`An equivalent query is already saved in your cache!`);
     }
   }
 }

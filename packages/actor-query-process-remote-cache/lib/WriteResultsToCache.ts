@@ -10,7 +10,9 @@ import {
 } from "@inrupt/solid-client";
 import { Session } from "@inrupt/solid-client-authn-node";
 import { Parser as SparqlParser } from "sparqljs";
-import type { IQueryOperationResultBindings } from "@comunica/types";
+import {
+  type CacheLocation
+} from "sparql-cache-client";
 
 const session = new Session();
 const authFetch = session.fetch.bind(session);
@@ -38,20 +40,24 @@ function generateHash(length: number): string {
  * @returns boolean representing if the querycache container could be found.
  */
 export async function ensureCacheContainer(
-  providedCache: string
+  providedCache: CacheLocation
 ): Promise<boolean> {
   let cacheUrl: string;
+  let cacheContainerUrl: string;
+
   // check if url contains querycache
-  if (!providedCache.endsWith("/")) {
-    cacheUrl = providedCache + "/";
+  if ("url" in providedCache) {
+    cacheUrl = providedCache.url;
   } else {
-    cacheUrl = providedCache;
+    console.log("Local cache operations are not currently supported.")
+    return false;
   }
+  cacheContainerUrl = cacheUrl.slice(0, cacheUrl.lastIndexOf("/") + 1);
 
   try {
     // Try to retrieve the dataset (container) ++ Queries.ttl file
+    await getSolidDataset(cacheContainerUrl, { fetch: authFetch });
     await getSolidDataset(cacheUrl, { fetch: authFetch });
-    await getSolidDataset(cacheUrl + "Queries.ttl", { fetch: authFetch });
     return true;
   } catch (error: any) {
     // If not found, create the container (if it is the users pod in question)
@@ -109,12 +115,16 @@ function buildRdfList(sources: string[]): { head: Thing; nodes: Thing[] } {
  * @returns The hash of the query added to queries.ttl.
  */
 export async function updateQueriesTTL(
-  containerUrl: string,
+  containerUrl: CacheLocation,
   query: string,
   sources: string[],
   fileName = "queries.ttl"
 ): Promise<string> {
   // Initiatize query cache variables
+  const cacheUrl = "url" in containerUrl ? containerUrl.url : containerUrl.path;
+    const cacheContainerUrl = cacheUrl.slice(0, cacheUrl.lastIndexOf("/") + 1);
+
+
   const hash = generateHash(6);
   const queryFile = `${hash}.rq`;
   const queryResult = `${hash}.json`;
@@ -142,18 +152,18 @@ export async function updateQueriesTTL(
   let dataset: SolidDataset, message: string;
   try {
     // Try to retrieve the dataset (container) and save updated dataset
-    dataset = await getSolidDataset(containerUrl + fileName, { fetch: authFetch });
+    dataset = await getSolidDataset(cacheUrl, { fetch: authFetch });
     message = `UPDATED queries.ttl which now includes: ${hash}`;
   } catch (error) {
-    return `No queries.ttl file found at ${containerUrl}. Please create one to save query results to Cache.`;
+    return `No queries.ttl file found at ${cacheUrl}. Please create one to save query results to Cache.`;
   }
 
   // Create the RDF List of sources
   const { head: sourceListHead, nodes: sourceListNodes } =
     buildRdfList(sources);
-
+  
   // Create a Thing for the new query cache
-  const subjectUri = `${containerUrl + fileName}#${hash}`;
+  const subjectUri = `${cacheUrl}#${hash}`;
   let newQueryThing: Thing = createThing({ url: subjectUri });
   newQueryThing = buildThing(newQueryThing)
     // Specify the query hash.
@@ -161,21 +171,19 @@ export async function updateQueriesTTL(
     .addUrl(`${TYPE}`, `${QUERYSELsubclass}`)
     .addIri(`${TYPE}`, `${sh}SPARQLExecutable`)
     // Add the query file
-    .addUrl(`${QUERYprop}`, `${containerUrl}${queryFile}`)
-    // add sh:prefixes
-    // .addIri(`${sh}prefixes}`, prefixes[0])
+    .addUrl(`${QUERYprop}`, `${cacheContainerUrl}${queryFile}`)
     // add query body
     // TODO: fix this so the query is enclosed in """ """ not " " ...
     .addStringNoLocale(`${sh}select`, query)
     // Add the results file name
-    .addUrl(`${RESULT}`, `${containerUrl}${queryResult}`)
+    .addUrl(`${RESULT}`, `${cacheContainerUrl}${queryResult}`)
     // Add sources as an RDF list
     .addIri(`${SOURCE}`, sourceListHead.url)
 
     // Add date of query execution.
     .addDatetime(`${CREATED}`, new Date())
     .build();
-
+  
   // Adds any SERVICE description sources to query entry
   if (serviceSources.length > 0) {
     serviceSources.forEach((source) => {
@@ -190,7 +198,8 @@ export async function updateQueriesTTL(
   sourceListNodes.forEach((node) => {
     dataset = setThing(dataset, node);
   });
-  await saveSolidDatasetAt(containerUrl + fileName, dataset, { fetch: authFetch });
+  
+  await saveSolidDatasetAt(cacheUrl, dataset, { fetch: authFetch });
   console.log(message);
   return hash;
 }
@@ -215,15 +224,18 @@ export async function updateQueriesTTL(
  * @returns The URL of the uploaded file.
  */
 export async function uploadQueryFile(
-  containerUrl: string,
+  containerUrl: CacheLocation,
   query: string,
   hashName: string
 ): Promise<string> {
+  const cacheUrl = "url" in containerUrl ? containerUrl.url : containerUrl.path;
+  const cacheContainerUrl = cacheUrl.slice(0, cacheUrl.lastIndexOf("/") + 1);
+
   const fileName = hashName + ".rq";
   const blob = new Blob([query], { type: "application/sparql-query" });
 
   try {
-    const savedFile = await saveFileInContainer(containerUrl, blob, {
+    const savedFile = await saveFileInContainer(cacheContainerUrl, blob, {
       slug: fileName,
       contentType: "application/sparql-query",
       fetch: authFetch,
@@ -304,17 +316,20 @@ export function parseSparqlQuery(queryString: string): string[] {
  * @returns The URL of the uploaded file.
  */
 export async function uploadResults(
-  containerUrl: string,
+  containerUrl: CacheLocation,
   jsonString: string,
   hashName: string
 ): Promise<string> {
+  const cacheUrl = "url" in containerUrl ? containerUrl.url : containerUrl.path;
+  const cacheContainerUrl = cacheUrl.slice(0, cacheUrl.lastIndexOf("/") + 1);
+
   const fileName = hashName + ".json";
   const blob = new Blob([jsonString], {
     type: "application/sparql-results+json",
   });
 
   try {
-    const savedFile = await saveFileInContainer(containerUrl, blob, {
+    const savedFile = await saveFileInContainer(cacheContainerUrl, blob, {
       slug: fileName,
       contentType: "application/json",
       fetch: authFetch,

@@ -15,10 +15,9 @@ import type {
   IQueryOperationResultBindings,
   IQueryOperationResultQuads,
   QuerySourceUnidentified,
+  MetadataBindings,
 } from "@comunica/types";
-import type {
-  IActionSparqlSerialize,
-} from "@comunica/bus-query-result-serialize";
+import type { IActionSparqlSerialize } from "@comunica/bus-query-result-serialize";
 import type { MediatorQueryResultSerializeHandle } from "@comunica/bus-query-result-serialize";
 import { BindingsFactory } from "@comunica/utils-bindings-factory";
 import type * as RDF from "@rdfjs/types";
@@ -98,8 +97,34 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
     action: IActionQueryProcess
   ): Promise<IActorQueryProcessOutput> {
     const [res, provenance] = await this.processQuery(action);
-    await this.handleResultAndCacheSave(res, action, provenance);
-    return res;
+    console.log(provenance);
+    const originalBindings = (res.result as IQueryOperationResultBindings)
+      .bindingsStream;
+    const originalMetadata = () =>
+      (res.result as IQueryOperationResultBindings).metadata();
+
+    const toClient = originalBindings.clone(); // handed off to Comunica
+    const toCache = originalBindings.clone(); // consumed by our cache
+
+    // 2) Kick off caching WITHOUT awaiting (so we don’t drain before returning)
+    void this.handleResultAndCacheSave(
+      // If your caching code expects a result object, give it a shallow copy
+      toCache,
+      originalMetadata,
+      action,
+      provenance
+    ).catch((err) => {
+      // Optional: log, but never throw here—don’t break the main flow
+      console?.error?.("Cache pipeline failed", err);
+    });
+
+    return {
+      result: {
+        type: "bindings",
+        bindingsStream: toClient,
+        metadata: originalMetadata,
+      },
+    };
   }
 
   public async processQuery(
@@ -901,22 +926,12 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
   }
 
   private async handleResultAndCacheSave(
-    res: IActorQueryProcessOutput,
+    resBindings: BindingsStream,
+    metadata: () => Promise<MetadataBindings>,
     action: IActionQueryProcess, // or the exact type you use for `run(action)`
     provenance: Provenance
   ): Promise<void> {
-    // Try to clone the stream so we can both return and cache
-    const original = (res.result as IQueryOperationResultBindings).bindingsStream;
-
-    // Make two clones
-    const toClient = original.clone();
-    const toCache = original.clone();
-
-    
-    
-
-    if (!toCache) {
-      console.log("no clone");
+    if (!resBindings) {
       this.logWarn(
         action.context,
         "BindingsStream.clone() not available; skipping JSON caching."
@@ -926,15 +941,10 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
     type SerializeBindingsHandle = IActionSparqlSerialize &
       IQueryOperationResultBindings;
 
-    let metadata: (() => Promise<any>) = async () => ({});
-    if ('metadata' in res.result && typeof res.result.metadata === 'function') {
-      metadata = res.result.metadata;
-    }
-
     const handle: SerializeBindingsHandle = {
       type: "bindings",
       context: action.context,
-      bindingsStream: toCache,
+      bindingsStream: resBindings,
       metadata,
     };
 
@@ -947,12 +957,12 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
       };
 
     // Mediate to get the serializer output
-    const serializeOutput =
-      await this.mediatorQueryResultSerialize.mediate(serializeAction);
+    const serializeOutput = await this.mediatorQueryResultSerialize.mediate(
+      serializeAction
+    );
 
     // Buffer JSON result
     const jsonPromise = await this.streamToString(serializeOutput.handle.data);
-    console.log(jsonPromise);
     const shouldSave = action.context.getSafe<boolean>(
       KeyRemoteCache.saveToCache
     );
@@ -999,9 +1009,7 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
     provenance: Provenance
   ): Promise<void> {
     // Save to cache logic
-    if (
-      provenance !== Algorithm.EQ
-    ) {
+    if (provenance !== Algorithm.EQ) {
       // cache location
       const cacheLocation = action.context.getSafe(KeyRemoteCache.location);
       // query
@@ -1022,7 +1030,11 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
       }
       // actually save stuff
       if (await ensureCacheContainer(cacheLocation)) {
-        console.log(`Saving query result to cache at: ${"url" in cacheLocation ? cacheLocation.url : cacheLocation.path}`);
+        console.log(
+          `Saving query result to cache at: ${
+            "url" in cacheLocation ? cacheLocation.url : cacheLocation.path
+          }`
+        );
         const hash = await updateQueriesTTL(
           cacheLocation,
           queryString,

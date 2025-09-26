@@ -85,7 +85,6 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
 
   public constructor(args: IActorQueryProcessRemoteCacheArgs) {
     super(args);
-    console.log("this is working");
     this.mediatorQueryResultSerialize = args.mediatorQueryResultSerialize;
   }
 
@@ -99,7 +98,6 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
     action: IActionQueryProcess
   ): Promise<IActorQueryProcessOutput> {
     const [res, provenance] = await this.processQuery(action);
-    console.log(res, provenance);
     await this.handleResultAndCacheSave(res, action, provenance);
     return res;
   }
@@ -908,10 +906,16 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
     provenance: Provenance
   ): Promise<void> {
     // Try to clone the stream so we can both return and cache
-    const original = (<IQueryOperationResultBindings>res.result).bindingsStream;
-    const cacheStream = original.clone();
+    const original = (res.result as IQueryOperationResultBindings).bindingsStream;
 
-    if (!cacheStream) {
+    // Make two clones
+    const toClient = original.clone();
+    const toCache = original.clone();
+
+    
+    
+
+    if (!toCache) {
       console.log("no clone");
       this.logWarn(
         action.context,
@@ -930,7 +934,7 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
     const handle: SerializeBindingsHandle = {
       type: "bindings",
       context: action.context,
-      bindingsStream: cacheStream,
+      bindingsStream: toCache,
       metadata,
     };
 

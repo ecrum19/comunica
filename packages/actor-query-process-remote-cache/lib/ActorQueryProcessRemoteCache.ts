@@ -155,6 +155,7 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
           resultOrError.value.stores
         );
       } else {
+        provenance = Algorithm.EQ;
         resultOrError.value.bindings.setProperty(
           ActorQueryProcessRemoteCache.STREAM_PROVENANCE_PROPERTY,
           {

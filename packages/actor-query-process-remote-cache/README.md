@@ -40,10 +40,3 @@ TODO: fill in parameters (this section can be removed if there are none)
 
 * `someParam`: Description of the param
 
-
-## Usage (CLI)
-** in base comunica directory
-```bash
-$ yarn install
-$ node engines/query-sparql-remote-cache/bin/query.js <source-url> -q "SPARQL-query" -t 'application/json' --location "cache-URL" --failOnCacheMiss false --saveToCache true
-```

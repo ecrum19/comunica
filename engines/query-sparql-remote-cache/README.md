@@ -31,226 +31,61 @@ Our top sponsors are shown below!
 <a href="https://opencollective.com/comunica-association/sponsor/2/website" target="_blank"><img src="https://opencollective.com/comunica-association/sponsor/2/avatar.svg"></a>
 <a href="https://opencollective.com/comunica-association/sponsor/3/website" target="_blank"><img src="https://opencollective.com/comunica-association/sponsor/3/avatar.svg"></a>
 
+## Motivation
+
+This Comunica actor was created for the TRIPLE Project and designed to enhance the reproducability of SPARQL query execution over federated SPARQL endpoints.
+
 ## Installation
 
-Comunica requires [Node.JS](http://nodejs.org/) 14.0 or higher and is tested on OSX and Linux.
-
-The easiest way to install the client is by installing it from NPM as follows:
+To install the remote-cache version of Comunica, first clone the glithub repo and intall dependencies using yarn.
 
 ```bash
-$ [sudo] npm install -g @comunica/query-sparql
+$ git clone https://github.com/ecrum19/comunica/tree/feature/remote-cache
+$ cd comunica
+$ yarn intsall
 ```
 
-Alternatively, you can install from the latest GitHub sources.
-For this, please refer to the README of the [Comunica monorepo](https://github.com/comunica/comunica).
-
-## Execute SPARQL queries
+## Execute + save SPARQL queries & results to a solid-pod hosted query cache
 
 This actor can be used to execute SPARQL queries from
-the command line, HTTP (SPARQL protocol), within a Node.JS application, or from a browser.
+the command line or within a Node.JS application. 
+The queries and results can be saved specified query cache 
+and that cache can be used to improve the performance of some queries.
+
+### Initialzing a query cache in a Solid Pod
+
+To use the query cache functionality provided by this actor, a pre-existing query cache must be present in your Solid pod
+AND the cache must allow for PUBLIC read + write access.
+For a guide about how to set-up a Solid Pod, initialize a query cache in that pod, and alter the permissions of that query cache see
+_[**TRIPLE Start Guide**](https://knowledgeonwebscale.github.io/solid-cockpit/)._
 
 ### Usage from the command line
 
-Show 100 triples from http://fragments.dbpedia.org/2015-10/en:
+General CLI command help:
 
 ```bash
-$ comunica-sparql https://fragments.dbpedia.org/2015-10/en "CONSTRUCT WHERE { ?s ?p ?o } LIMIT 100"
+$ node engines/query-sparql-remote-cache/bin/query.js -h
 ```
 
-Show all triples from http://dbpedia.org/resource/Belgium:
+Archytipical remote-cache CLI command:
 
 ```bash
-$ comunica-sparql https://dbpedia.org/resource/Belgium "CONSTRUCT WHERE { ?s ?p ?o }"
+$ node engines/query-sparql-remote-cache/bin/query.js sourece1-url source2-url -q "SPARQL query text" -t 'application/sparql-results+json' --location cache-queries.ttl-url --failOnCacheMiss boolean --saveToCache boolean
 ```
 
-Combine multiple sources:
+Simple demonstrator query:
 
 ```bash
-$ comunica-sparql https://fragments.dbpedia.org/2015-10/en \
-  file@https://dbpedia.org/resource/Belgium "CONSTRUCT WHERE { ?s ?p ?o } LIMIT 100"
+$ node engines/query-sparql-remote-cache/bin/query.js https://sparql.rhea-db.org/sparql/ -q "SELECT DISTINCT ?s WHERE {?s ?t ?o .} LIMIT 10" -t 'application/json' --location "https://triple.ilabt.imec.be/test/querycache/queries.ttl" --failOnCacheMiss false --saveToCache true
 ```
 
-Show the help with all options:
+Demonstrator query #4 (Rhea):
+(Note: all TRIPLE Project demonstrator queries can be found in this root of this repo at `~/comunica/cache/demonstrator-queries/`)
 
 ```bash
-$ comunica-sparql --help
+$ node engines/query-sparql-remote-cache/bin/query.js https://sparql.rhea-db.org/sparql/ -f cache/demonstrator-queries/triple-rhea-4.rq -t 'application/json' --location "https://triple.ilabt.imec.be/test/querycache/queries.ttl" --failOnCacheMiss false --saveToCache true
 ```
 
-The dynamic variant of this executable is `comunica-dynamic-sparql`.
-An alternative config file can be passed via the `COMUNICA_CONFIG` environment variable.
-
-When you are working with this module in the Comunica monorepo development environment,
-this command can be invoked directly as follows (when inside the `engines/query-sparql` folder):
-
-```bash
-node bin/query.js https://fragments.dbpedia.org/2016-04/en "CONSTRUCT WHERE { ?s ?p ?o } LIMIT 100"
-```
-
-Use `bin/query-dynamic.js` when running dynamically inside the Comunica monorepo development environment.
-
-_[**Read more** about querying from the command line](https://comunica.dev/docs/query/getting_started/query_cli/)._
-
-### Usage as a SPARQL endpoint
-
-Start a webservice exposing https://fragments.dbpedia.org/2015-10/en via the SPARQL protocol, i.e., a _SPARQL endpoint_.
-
-```bash
-$ comunica-sparql-http https://fragments.dbpedia.org/2015/en
-```
-
-This command has a similar signature to `comunica-sparql`, minus the query input options.
-
-Show the help with all options:
-
-```bash
-$ comunica-sparql-http --help
-```
-
-The SPARQL endpoint can only be started dynamically.
-An alternative config file can be passed via the `COMUNICA_CONFIG` environment variable.
-
-Use `bin/http.js` when running in the Comunica monorepo development environment.
-
-_[**Read more** about setting up a SPARQL endpoint](https://comunica.dev/docs/query/getting_started/setup_endpoint/)._
-
-### Usage within application
-
-The easiest way to create an engine (with default config) is as follows:
-
-```javascript
-const QueryEngine = require('@comunica/query-sparql').QueryEngine;
-
-const myEngine = new QueryEngine();
-```
-
-Alternatively, an engine can also be created dynamically with a custom config:
-
-```javascript
-const QueryEngineFactory = require('@comunica/query-sparql').QueryEngineFactory;
-
-const myEngine = await new QueryEngineFactory().create({ configPath: 'path/to/config.json' });
-```
-
-Once you have created your query engine,
-you can use it to call one of the async query methods,
-such as `queryBindings` for `SELECT` queries,
-`queryQuads` for `CONSTRUCT` and `DESCRIBE` queries,
-`queryBoolean` for `ASK` queries,
-or `queryVoid` for update queries.
-
-All query methods have the require a query string and a context object,
-with the return type depending on the query type.
-
-For example, a `SELECT` query can be executed as follows:
-
-```javascript
-const bindingsStream = await myEngine.queryBindings(`
-  SELECT ?s ?p ?o WHERE {
-    ?s ?p <http://dbpedia.org/resource/Belgium>.
-    ?s ?p ?o
-  } LIMIT 100`, {
-  sources: [ 'http://fragments.dbpedia.org/2015/en' ],
-});
-
-// Consume results as a stream (best performance)
-bindingsStream.on('data', (binding) => {
-  console.log(binding.toString()); // Quick way to print bindings for testing
-
-  console.log(binding.has('s')); // Will be true
-
-  // Obtaining values
-  console.log(binding.get('s').value);
-  console.log(binding.get('s').termType);
-  console.log(binding.get('p').value);
-  console.log(binding.get('o').value);
-});
-bindingsStream.on('end', () => {
-  // The data-listener will not be called anymore once we get here.
-});
-bindingsStream.on('error', (error) => {
-  console.error(error);
-});
-
-// Consume results as async iterable (easier)
-for await (const binding of bindingsStream) {
-  console.log(binding.toString());
-}
-
-// Consume results as an array (easier)
-const bindings = await bindingsStream.toArray();
-console.log(bindings[0].get('s').value);
-console.log(bindings[0].get('s').termType);
-```
-
-Optionally, specific [types of sources](https://comunica.dev/docs/query/advanced/source_types/) can be specified (_otherwise, the type of source will be detected automatically_):
-
-```javascript
-const bindingsStream = await myEngine.queryBindings(`...`, {
-  sources: [
-    'http://fragments.dbpedia.org/2015/en',
-    {
-      type: 'hypermedia',
-      value: 'http://fragments.dbpedia.org/2016/en'
-    },
-    {
-      type: 'file',
-      value: 'https://www.rubensworks.net/'
-    },
-    new N3Store(),
-    {
-      type: 'sparql',
-      value: 'https://dbpedia.org/sparql'
-    },
-  ],
-});
-```
-
-**Note: Some SPARQL endpoints may be recognised as a file instead of a SPARQL endpoint due to them not supporting [SPARQL Service Description](https://www.w3.org/TR/sparql11-service-description/), which may produce incorrect results. For these cases, the `sparql` type MUST be set.**
-
-For `CONSTRUCT` and `DESCRIBE` queries,
-results can be collected as follows.
-
-```javascript
-const quadStream = await myEngine.queryQuads(`
-  CONSTRUCT WHERE {
-    ?s ?p ?o
-  } LIMIT 100`, {
-  sources: ['http://fragments.dbpedia.org/2015/en'],
-});
-
-// Consume results as a stream (best performance)
-quadStream.on('data', (quad) => {
-    console.log(quad.subject.value);
-    console.log(quad.predicate.value);
-    console.log(quad.object.value);
-    console.log(quad.graph.value);
-});
-
-// Consume results as asynciterable (easier)
-for await (const quad of quadStream) {
-  console.log(quad.subject.value);
-}
-
-// Consume results as an array (easier)
-const quads = await quadStream.toArray();
-console.log(quads[0].subject.value);
-console.log(quads[0].predicate.value);
-console.log(quads[0].object.value);
-console.log(quads[0].graph.value);
-```
-
-Finally, `ASK` queries return async booleans.
-
-```javascript
-const hasMatches = await myEngine.queryAsk(`
-  ASK {
-    ?s ?p <http://dbpedia.org/resource/Belgium>
-  }`, {
-  sources: ['http://fragments.dbpedia.org/2015/en'],
-})
-```
-
-_[**Read more** about querying an application](https://comunica.dev/docs/query/getting_started/query_app/)._
 
 ## Learn more
 

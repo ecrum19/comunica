@@ -85,6 +85,7 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
 
   public constructor(args: IActorQueryProcessRemoteCacheArgs) {
     super(args);
+    console.log("this is working");
     this.mediatorQueryResultSerialize = args.mediatorQueryResultSerialize;
   }
 
@@ -98,6 +99,7 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
     action: IActionQueryProcess
   ): Promise<IActorQueryProcessOutput> {
     const [res, provenance] = await this.processQuery(action);
+    console.log(res, provenance);
     await this.handleResultAndCacheSave(res, action, provenance);
     return res;
   }
@@ -946,11 +948,24 @@ export class ActorQueryProcessRemoteCache extends ActorQueryProcess {
 
     // Buffer JSON result
     const jsonPromise = await this.streamToString(serializeOutput.handle.data);
+    console.log(jsonPromise);
     const shouldSave = action.context.getSafe<boolean>(
       KeyRemoteCache.saveToCache
     );
     // TODO: Solve equivalent query in cache case
     if (shouldSave) {
+      if (provenance === Algorithm.EQ) {
+        console.log(`An equivalent query is already saved in your cache!`);
+        return;
+      } else if (provenance === "query processing") {
+        console.log(
+          `The query was not found in your cache, executing and saving results now... `
+        );
+      } else {
+        console.log(
+          `The query was similar to another found in your cache, executing complementary queries and saving results now... `
+        );
+      }
       try {
         await this.saveToCache(jsonPromise, action, provenance);
       } catch (e) {

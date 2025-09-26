@@ -193,6 +193,8 @@ export async function updateQueriesTTL(
     });
   }
 
+  // TODO: add statement for when permissions of querycache don't allow for writing
+
   // Adds query sources to query entry
   dataset = setThing(dataset, newQueryThing);
   sourceListNodes.forEach((node) => {

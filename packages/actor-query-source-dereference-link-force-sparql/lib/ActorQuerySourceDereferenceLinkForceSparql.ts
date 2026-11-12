@@ -18,14 +18,19 @@ import { Readable } from 'readable-stream';
 export class ActorQuerySourceDereferenceLinkForceSparql extends ActorQuerySourceDereferenceLink {
   public readonly mediatorMetadataAccumulate: MediatorRdfMetadataAccumulate;
   public readonly mediatorQuerySourceIdentifyHypermedia: MediatorQuerySourceIdentifyHypermedia;
+  public readonly fetchServiceDescription: boolean;
 
   public constructor(args: IActorQuerySourceDereferenceLinkForceSparqlArgs) {
     super(args);
     this.mediatorMetadataAccumulate = args.mediatorMetadataAccumulate;
     this.mediatorQuerySourceIdentifyHypermedia = args.mediatorQuerySourceIdentifyHypermedia;
+    this.fetchServiceDescription = Boolean(args.fetchServiceDescription);
   }
 
   public async test(action: IActionQuerySourceDereferenceLink): Promise<TestResult<IActorTest>> {
+    if (this.fetchServiceDescription) {
+      return failTest(`${this.name} is configured to let the service description of SPARQL sources be fetched`);
+    }
     if (action.link.forceSourceType === 'sparql' && action.context.get(KeysQueryOperation.querySources)?.length === 1) {
       return passTestVoid();
     }
@@ -67,4 +72,11 @@ export interface IActorQuerySourceDereferenceLinkForceSparqlArgs extends IActorQ
    * The hypermedia resolve mediator
    */
   mediatorQuerySourceIdentifyHypermedia: MediatorQuerySourceIdentifyHypermedia;
+  /**
+   * If the service description of a single forced SPARQL source should still be fetched,
+   * e.g. to discover the restrictions of the endpoint.
+   * If enabled, this actor does not handle any sources, so that other actors fetch the service description.
+   * @default {false}
+   */
+  fetchServiceDescription?: boolean;
 }

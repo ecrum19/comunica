@@ -55,7 +55,7 @@
     "ccqs:config/rdf-metadata/mediators.json",
     "ccqs:config/rdf-metadata-accumulate/actors.json",
     "ccqs:config/rdf-metadata-accumulate/mediators.json",
-    "ccqs:config/rdf-metadata-extract/actors-v5-3-0.json",
+    "ccqs:config/rdf-metadata-extract/actors-v5-4-1.json",
     "ccqs:config/rdf-metadata-extract/mediators.json",
     "ccqs:config/rdf-parse/actors.json",
     "ccqs:config/rdf-parse/mediators.json",

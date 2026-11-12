@@ -1,0 +1,26 @@
+{
+  "@context": [
+    "https://linkedsoftwaredependencies.org/bundles/npm/componentsjs/^6.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/config-query-sparql/^5.0.0/components/context.jsonld",
+    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-query-source-dereference-link-force-sparql/^5.0.0/components/context.jsonld"
+  ],
+  "import": [
+    "ccqs:config/config-default-v5-4-1.json"
+  ],
+  "@graph": [
+    {
+      "@id": "urn:comunica:test:fetch-service-description",
+      "@type": "Override",
+      "overrideInstance": { "@id": "urn:comunica:default:query-source-dereference-link/actors#force-sparql" },
+      "overrideSteps": [
+        {
+          "@type": "OverrideParameters",
+          "overrideValue": {
+            "@type": "ActorQuerySourceDereferenceLinkForceSparql",
+            "fetchServiceDescription": true
+          }
+        }
+      ]
+    }
+  ]
+}

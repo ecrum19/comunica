@@ -40,3 +40,4 @@ After installing, this package can be added to your engine's configuration as fo
 
 * `mediatorMetadataAccumulate`: A mediator over the [Metadata Accumulatebus](https://github.com/comunica/comunica/tree/master/packages/bus-metadata-accumulate).
 * `mediatorQuerySourceIdentifyHypermedia`: A mediator over the [Query Source Identify Hypermedia bus](https://github.com/comunica/comunica/tree/master/packages/bus-query-source-identify-hypermedia).
+* `fetchServiceDescription`: If the service description of a single forced SPARQL source should still be fetched, e.g. to discover the restrictions of the endpoint. If enabled, this actor does not handle any sources, so that other actors fetch the service description. Defaults to `false`.

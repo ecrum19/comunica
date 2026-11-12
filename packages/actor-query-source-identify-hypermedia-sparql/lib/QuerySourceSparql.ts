@@ -9,6 +9,7 @@ import type {
   FragmentSelectorShape,
   IActionContext,
   IDataset,
+  IEndpointRestriction,
   IPhysicalQueryPlanNode,
   IQueryBindingsOptions,
   IQuerySource,
@@ -27,7 +28,7 @@ import {
 } from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
-import { TransformIterator, wrap } from 'asynciterator';
+import { ArrayIterator, TransformIterator, wrap } from 'asynciterator';
 import type { ISparqlEndpointFetcherRequestOptions } from 'fetch-sparql-endpoint';
 import { SparqlEndpointFetcher } from 'fetch-sparql-endpoint';
 import { LRUCache } from 'lru-cache';
@@ -58,6 +59,9 @@ export class QuerySourceSparql implements IQuerySource {
   private readonly dataFactory: ComunicaDataFactory;
   private readonly algebraFactory: AlgebraFactory;
   private readonly bindingsFactory: BindingsFactory;
+  private readonly restrictions?: IEndpointRestriction[];
+  private readonly resultLimit?: number;
+  private readonly requestInterval?: number;
 
   private readonly endpointFetcher: SparqlEndpointFetcher;
   private readonly cache: LRUCache<string, QueryResultCardinality> | undefined;
@@ -86,6 +90,7 @@ export class QuerySourceSparql implements IQuerySource {
     forceGetIfUrlLengthBelow: number,
     parseUnsupportedVersions: boolean,
     metadata: Record<string, any>,
+    restrictionAwarePlanning = true,
   ) {
     this.referenceValue = urlBackup;
     this.url = url;
@@ -126,6 +131,40 @@ export class QuerySourceSparql implements IQuerySource {
     this.datasets = metadata.datasets;
     this.extensionFunctions = metadata.extensionFunctions;
     this.propertyFeatures = metadata.propertyFeatures ? new Set(metadata.propertyFeatures) : undefined;
+    if (metadata.restrictions?.length > 0) {
+      this.restrictions = metadata.restrictions;
+      if (restrictionAwarePlanning) {
+        this.resultLimit = QuerySourceSparql.getResultLimit(metadata.restrictions);
+        this.requestInterval = QuerySourceSparql.getRequestInterval(metadata.restrictions);
+      }
+    }
+  }
+
+  /**
+   * Determine the maximum number of results that the endpoint returns per request,
+   * based on its result size restrictions.
+   * @param restrictions The restrictions of the endpoint.
+   * @return The maximum number of results, or undefined if unrestricted.
+   */
+  public static getResultLimit(restrictions: IEndpointRestriction[]): number | undefined {
+    const limits = restrictions
+      .filter(restriction => restriction.type === 'resultSize' && restriction.maxValue && restriction.maxValue > 0)
+      .map(restriction => restriction.maxValue!);
+    return limits.length > 0 ? Math.min(...limits) : undefined;
+  }
+
+  /**
+   * Determine the minimal average interval between requests to the endpoint in milliseconds,
+   * based on its rate and quota restrictions.
+   * @param restrictions The restrictions of the endpoint.
+   * @return The interval, or undefined if unrestricted.
+   */
+  public static getRequestInterval(restrictions: IEndpointRestriction[]): number | undefined {
+    const intervals = restrictions
+      .filter(restriction => (restriction.type === 'rate' || restriction.type === 'quota') &&
+        restriction.maxValue && restriction.maxValue > 0 && restriction.windowDuration)
+      .map(restriction => restriction.windowDuration! / restriction.maxValue!);
+    return intervals.length > 0 ? Math.max(...intervals) : undefined;
   }
 
   /**
@@ -149,6 +188,11 @@ export class QuerySourceSparql implements IQuerySource {
     // in which case we permanently fall back to a direct POST, which carries an identical body.
     if (this.httpQueryMethodRejected && init?.method === 'QUERY') {
       init = { ...init, method: 'POST' };
+    }
+
+    // Pass the restrictions of the endpoint, so that they can be respected when sending requests.
+    if (this.restrictions) {
+      context = context.set(KeysHttp.endpointRestrictions, this.restrictions);
     }
 
     this.countHttpRequest(context);
@@ -272,11 +316,17 @@ export class QuerySourceSparql implements IQuerySource {
       // Prepare queries
       const operation = await operationPromise;
       const variables: RDF.Variable[] = algebraUtils.inScopeVariables(operation);
+      const undefVariables = QuerySourceSparql.getOperationUndefs(operation);
+
+      // Request results in pages if the endpoint would otherwise truncate them.
+      if (this.resultLimit !== undefined && !QuerySourceSparql.isLimitedTo(operation, this.resultLimit)) {
+        return this.queryBindingsPaged(operation, variables, context, undefVariables, this.resultLimit, 0);
+      }
+
       // Join bindings modify the operation, so it is no longer equivalent to the original query string.
       const queryString = options?.joinBindings ? undefined : QuerySourceSparql.getQueryStringAsIs(operation, context);
       const selectQuery: string = queryString ??
         await this.operationToSelectQuery(this.algebraFactory, operation, variables);
-      const undefVariables = QuerySourceSparql.getOperationUndefs(operation);
 
       this.reportSourceQuery(context, selectQuery);
       return this.queryBindingsRemote(this.url, selectQuery, variables, context, undefVariables);
@@ -284,6 +334,57 @@ export class QuerySourceSparql implements IQuerySource {
     this.attachMetadata(bindings, context, operationPromise);
 
     return bindings;
+  }
+
+  /**
+   * Query the bindings of an operation in pages of the given size, using LIMIT and OFFSET,
+   * so that results are not truncated by endpoints that restrict their result size.
+   * Pages are requested in sequence, until a page contains fewer results than the page size.
+   * As with any OFFSET-based paging, pages are only guaranteed to be consistent for ordered results.
+   * @param operation The operation to query.
+   * @param variables The variables in scope for the operation.
+   * @param context The context of the operation.
+   * @param undefVariables Variables that may have undefs.
+   * @param pageSize The number of results per page.
+   * @param offset The offset of the page to request.
+   */
+  protected async queryBindingsPaged(
+    operation: Algebra.Operation,
+    variables: RDF.Variable[],
+    context: IActionContext,
+    undefVariables: RDF.Variable[],
+    pageSize: number,
+    offset: number,
+  ): Promise<BindingsStream> {
+    const pageQuery = await this.operationToQuery(this.algebraFactory.createSlice(
+      isKnownOperation(operation, Algebra.Types.PROJECT) ?
+        operation :
+        this.algebraFactory.createProject(operation, variables),
+      offset,
+      pageSize,
+    ));
+    this.reportSourceQuery(context, pageQuery);
+    const page = await this.queryBindingsRemote(this.url, pageQuery, variables, context, undefVariables);
+
+    let pageResults = 0;
+    return page
+      .map((bindings) => {
+        pageResults++;
+        return bindings;
+      })
+      .append(new TransformIterator<RDF.Bindings>(async() => pageResults === pageSize ?
+        this.queryBindingsPaged(operation, variables, context, undefVariables, pageSize, offset + pageSize) :
+        new ArrayIterator<RDF.Bindings>([], { autoStart: false }), { autoStart: false }));
+  }
+
+  /**
+   * Check if the given operation produces at most the given number of results due to its own LIMIT.
+   * @param operation A query operation.
+   * @param limit A number of results.
+   */
+  public static isLimitedTo(operation: Algebra.Operation, limit: number): boolean {
+    return isKnownOperation(operation, Algebra.Types.SLICE) && operation.length !== undefined &&
+      operation.length <= limit;
   }
 
   public queryQuads(operation: Algebra.Operation, context: IActionContext): AsyncIterator<RDF.Quad> {
@@ -354,8 +455,10 @@ export class QuerySourceSparql implements IQuerySource {
           }
         }
 
-        // Don't send count queries if disabled.
-        if (!this.cardinalityCountQueries) {
+        // Don't send count queries if disabled,
+        // or if the rate limit of the endpoint would on average delay them beyond the count timeout.
+        if (!this.cardinalityCountQueries ||
+          (this.requestInterval !== undefined && this.requestInterval > this.countTimeout)) {
           return resolve({ type: 'estimate', value: Number.POSITIVE_INFINITY, dataset: this.url });
         }
 
@@ -413,13 +516,23 @@ export class QuerySourceSparql implements IQuerySource {
       .then(cardinality => target.setProperty('metadata', {
         state: new MetadataValidationState(),
         cardinality,
+        ...this.getRequestTimeMetadata(),
         variables: variablesCount,
       }))
       .catch(() => target.setProperty('metadata', {
         state: new MetadataValidationState(),
         cardinality: { type: 'estimate', value: Number.POSITIVE_INFINITY, dataset: this.url },
+        ...this.getRequestTimeMetadata(),
         variables: variablesCount,
       }));
+  }
+
+  /**
+   * Obtain the metadata entry for the time per request, if the requests to the endpoint are rate-limited.
+   * This lets join actors take into account the number of requests that their join method requires.
+   */
+  protected getRequestTimeMetadata(): { requestTime?: number } {
+    return this.requestInterval === undefined ? {} : { requestTime: this.requestInterval };
   }
 
   /**

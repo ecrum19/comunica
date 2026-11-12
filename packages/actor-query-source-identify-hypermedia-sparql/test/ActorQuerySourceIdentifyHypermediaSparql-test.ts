@@ -62,6 +62,7 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
         cardinalityCountQueries: true,
         cardinalityEstimateConstruction: false,
         forceGetIfUrlLengthBelow: 600,
+        restrictionAwarePlanning: true,
         sparqlServerSoftwarePatterns: [ 'Virtuoso', 'Fuseki' ],
       });
     });
@@ -129,6 +130,7 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
           cardinalityEstimateConstruction: false,
           cacheSize: 0,
           forceGetIfUrlLengthBelow: 0,
+          restrictionAwarePlanning: true,
         });
         await expect(actor.test({ url: 'URL/sparql', metadata: {}, quads: <any> null, context })).resolves
           .toFailTest('Actor actor could not detect a SPARQL service description or URL ending on /sparql.');
@@ -149,6 +151,7 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
           cardinalityEstimateConstruction: false,
           cacheSize: 0,
           forceGetIfUrlLengthBelow: 0,
+          restrictionAwarePlanning: true,
         });
         await expect(actor
           .test({ url: 'URL/sparql', metadata: {}, quads: <any> null, forceSourceType: 'file', context }))
@@ -170,6 +173,7 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
           cardinalityEstimateConstruction: false,
           cacheSize: 0,
           forceGetIfUrlLengthBelow: 0,
+          restrictionAwarePlanning: true,
         });
         await expect(actor.test({
           url: 'URL',
@@ -195,6 +199,7 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
           cardinalityEstimateConstruction: false,
           cacheSize: 0,
           forceGetIfUrlLengthBelow: 0,
+          restrictionAwarePlanning: true,
         });
         await expect(actor.test({
           url: 'URL',
@@ -250,6 +255,7 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
           cardinalityEstimateConstruction: false,
           cacheSize: 0,
           forceGetIfUrlLengthBelow: 0,
+          restrictionAwarePlanning: true,
           sparqlServerSoftwarePatterns: [ 'Custom' ],
         });
         await expect(actor.test({
@@ -276,6 +282,7 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
           cardinalityEstimateConstruction: false,
           cacheSize: 0,
           forceGetIfUrlLengthBelow: 0,
+          restrictionAwarePlanning: true,
         });
         await expect(actor.test({
           url: 'URL',
@@ -327,6 +334,28 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
         const output = await actor
           .run({ url: 'URL', metadata: { sparqlService: 'SERVICE' }, quads: <any> null, context });
         expect((<any> output.source).cache.max).toBe(1_024);
+      });
+
+      it('should return a source that takes restrictions into account', async() => {
+        const output = await actor.run({
+          url: 'URL',
+          metadata: { sparqlService: 'SERVICE', restrictions: [{ type: 'resultSize', maxValue: 10 }]},
+          quads: <any> null,
+          context,
+        });
+        expect((<any> output.source).resultLimit).toBe(10);
+      });
+
+      it('should return a source that ignores restrictions for planning if configured', async() => {
+        (<any> actor).restrictionAwarePlanning = false;
+        const output = await actor.run({
+          url: 'URL',
+          metadata: { sparqlService: 'SERVICE', restrictions: [{ type: 'resultSize', maxValue: 10 }]},
+          quads: <any> null,
+          context,
+        });
+        expect((<any> output.source).resultLimit).toBeUndefined();
+        expect((<any> output.source).restrictions).toEqual([{ type: 'resultSize', maxValue: 10 }]);
       });
     });
   });

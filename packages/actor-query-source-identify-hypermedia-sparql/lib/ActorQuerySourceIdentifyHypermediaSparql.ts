@@ -35,6 +35,7 @@ export class ActorQuerySourceIdentifyHypermediaSparql extends ActorQuerySourceId
   public readonly cardinalityEstimateConstruction: boolean;
   public readonly forceGetIfUrlLengthBelow: number;
   public readonly sparqlServerSoftwarePatterns: RegExp[];
+  public readonly restrictionAwarePlanning: boolean;
 
   public constructor(args: IActorQuerySourceIdentifyHypermediaSparqlArgs) {
     super(args, 'sparql');
@@ -53,6 +54,7 @@ export class ActorQuerySourceIdentifyHypermediaSparql extends ActorQuerySourceId
     this.sparqlServerSoftwarePatterns = (
       args.sparqlServerSoftwarePatterns ?? []
     ).map(pattern => new RegExp(pattern, 'u'));
+    this.restrictionAwarePlanning = args.restrictionAwarePlanning;
   }
 
   public checkServerSoftware(serverSoftware?: string): boolean {
@@ -104,6 +106,7 @@ export class ActorQuerySourceIdentifyHypermediaSparql extends ActorQuerySourceId
       this.forceGetIfUrlLengthBelow,
       Boolean(action.context.get(KeysInitQuery.parseUnsupportedVersions)),
       action.metadata,
+      this.restrictionAwarePlanning,
     );
     return { source };
   }
@@ -176,6 +179,14 @@ export interface IActorQuerySourceIdentifyHypermediaSparqlArgs extends IActorQue
    * Regexes to match against the server header to identify SPARQL endpoints.
    */
   sparqlServerSoftwarePatterns?: string[];
+  /**
+   * If the restrictions that the endpoint advertises in its service description should be taken into account
+   * when querying it: results are requested in pages if they would be truncated,
+   * the minimal time between requests is exposed to the query planner,
+   * and count queries are skipped if the rate limit would delay them beyond the count timeout.
+   * @default {true}
+   */
+  restrictionAwarePlanning: boolean;
 }
 
 export type BindMethod = 'values' | 'union' | 'filter';

@@ -65,6 +65,21 @@ describe('ActorQuerySourceDereferenceLinkForceSparql', () => {
         })).resolves.toPassTestVoid();
       });
 
+      it('should not pass for a SPARQL endpoint if service descriptions must be fetched', async() => {
+        actor = new ActorQuerySourceDereferenceLinkForceSparql({
+          name: 'actor',
+          bus,
+          mediatorMetadataAccumulate,
+          mediatorQuerySourceIdentifyHypermedia,
+          fetchServiceDescription: true,
+        });
+        await expect(actor.test({
+          link: { url: 'URL', forceSourceType: 'sparql' },
+          context: new ActionContext()
+            .set(KeysQueryOperation.querySources, [ <any> 'abc' ]),
+        })).resolves.toFailTest('actor is configured to let the service description of SPARQL sources be fetched');
+      });
+
       it('should not pass for multiple sources', async() => {
         await expect(actor.test({
           link: { url: 'URL', forceSourceType: 'sparql' },

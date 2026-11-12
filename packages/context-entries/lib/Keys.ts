@@ -20,6 +20,7 @@ import type {
   ComunicaDataFactory,
   IStatisticBase,
   IDiscoverEventData,
+  IEndpointRestriction,
   IServiceExecutor,
   ServiceExecutorCreator,
   PartialResult,
@@ -117,6 +118,12 @@ export const KeysHttp = {
    * This only will only do something outside a browser environment, as browsers take care of caching internally.
    */
   httpCache: new ActionContextKey<boolean>('@comunica/bus-http:httpCache'),
+  /**
+   * The operational restrictions of the endpoint that is being requested, such as rate limits,
+   * as advertised in its service description.
+   * This is set by query sources for their own requests, and is not meant to be set by users.
+   */
+  endpointRestrictions: new ActionContextKey<IEndpointRestriction[]>('@comunica/bus-http:endpoint-restrictions'),
 };
 
 export const KeysHttpWayback = {

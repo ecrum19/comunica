@@ -2,7 +2,7 @@ import { PassThrough } from 'node:stream';
 import { ActorQuerySerializeSparql } from '@comunica/actor-query-serialize-sparql';
 import { KeysCore, KeysHttp, KeysInitQuery } from '@comunica/context-entries';
 import { ActionContext, ActionContextKey } from '@comunica/core';
-import type { IActionContext, IDataset, QueryResultCardinality } from '@comunica/types';
+import type { IActionContext, IDataset, IEndpointRestriction, QueryResultCardinality } from '@comunica/types';
 import { AlgebraFactory, Algebra } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { MetadataValidationState } from '@comunica/utils-metadata';
@@ -3161,6 +3161,249 @@ describe('QuerySourceSparql', () => {
       );
       const operation = AF.createPath(DF.variable('s'), AF.createNps([ DF.namedNode('ex:p') ]), DF.variable('params'));
       expect(source.operationUsesPropertyFeatures(operation)).toBeFalsy();
+    });
+  });
+
+  describe('with endpoint restrictions', () => {
+    const resultRestriction: IEndpointRestriction = { type: 'resultSize', maxValue: 2, enforcement: 'truncate' };
+    const strictRateRestriction: IEndpointRestriction = { type: 'rate', maxValue: 1, windowDuration: 60_000 };
+    const looseRateRestriction: IEndpointRestriction = { type: 'rate', maxValue: 60, windowDuration: 60_000 };
+
+    /**
+     * Create a mediator for an endpoint that has the given number of results for every query,
+     * and that respects LIMIT and OFFSET, unless configured otherwise.
+     * @param total The number of results.
+     * @param ignoreLimit If LIMIT and OFFSET should be ignored.
+     */
+    function createPagingMediator(total: number, ignoreLimit = false): any {
+      return {
+        mediate: jest.fn((action: any) => {
+          const query = new URLSearchParams(action.init.body.toString()).get('query')!;
+          if (isCountQuery(query)) {
+            return {
+              headers: new Headers({ 'Content-Type': 'application/sparql-results+json' }),
+              body: Readable.from([ JSON.stringify({
+                head: { vars: [ 'count' ]},
+                results: { bindings: [{ count: { type: 'literal', value: `${total}` }}]},
+              }) ]),
+              ok: true,
+            };
+          }
+          const limit = /LIMIT (\d+)/u.exec(query);
+          const offset = /OFFSET (\d+)/u.exec(query);
+          const start = offset && !ignoreLimit ? Number(offset[1]) : 0;
+          const end = limit && !ignoreLimit ? Math.min(total, start + Number(limit[1])) : total;
+          const bindings = [];
+          for (let i = start; i < end; i++) {
+            bindings.push({ p: { type: 'uri', value: `p${i}` }});
+          }
+          return {
+            headers: new Headers({ 'Content-Type': 'application/sparql-results+json' }),
+            body: Readable.from([ JSON.stringify({ head: { vars: [ 'p' ]}, results: { bindings }}) ]),
+            ok: true,
+          };
+        }),
+      };
+    }
+
+    function createSource(
+      mediator: any,
+      metadata: Record<string, any>,
+      restrictionAwarePlanning?: boolean,
+      cardinalityCountQueries = false,
+    ): QuerySourceSparql {
+      return new QuerySourceSparql(
+        url,
+        url,
+        ctx,
+        mediator,
+        mediatorQuerySerialize,
+        'values',
+        DF,
+        AF,
+        BF,
+        false,
+        64,
+        10000,
+        cardinalityCountQueries,
+        false,
+        0,
+        false,
+        metadata,
+        restrictionAwarePlanning,
+      );
+    }
+
+    function getQueries(mediator: any): string[] {
+      return mediator.mediate.mock.calls
+        .map((call: any) => new URLSearchParams(call[0].init.body.toString()).get('query'));
+    }
+
+    function expectedBindings(count: number): RDF.Bindings[] {
+      return Array.from({ length: count }, (_, i) => BF.fromRecord({ p: DF.namedNode(`p${i}`) }));
+    }
+
+    const pattern = AF.createPattern(iriS, DF.variable('p'), iriO);
+    const patternQuery = `<${testUrl('s')}> ?p <${testUrl('o')}> .`;
+
+    describe('getResultLimit', () => {
+      it('should return the lowest result size limit', () => {
+        expect(QuerySourceSparql.getResultLimit([
+          { type: 'resultSize', maxValue: 10_000 },
+          { type: 'resultSize', maxValue: 50_000 },
+          { type: 'resultSize', maxValue: 0 },
+          { type: 'resultSize' },
+          { type: 'rate', maxValue: 1 },
+        ])).toBe(10_000);
+      });
+
+      it('should return undefined without result size limits', () => {
+        expect(QuerySourceSparql.getResultLimit([ looseRateRestriction ])).toBeUndefined();
+      });
+    });
+
+    describe('getRequestInterval', () => {
+      it('should return the longest interval between requests', () => {
+        expect(QuerySourceSparql.getRequestInterval([
+          looseRateRestriction,
+          { type: 'quota', maxValue: 1_000, windowDuration: 86_400_000 },
+          { type: 'rate', maxValue: 0, windowDuration: 60_000 },
+          { type: 'rate', windowDuration: 60_000 },
+          { type: 'rate', maxValue: 1 },
+          { type: 'concurrentRequests', maxValue: 1 },
+        ])).toBe(86_400);
+      });
+
+      it('should return undefined without rate limits', () => {
+        expect(QuerySourceSparql.getRequestInterval([ resultRestriction ])).toBeUndefined();
+      });
+    });
+
+    describe('isLimitedTo', () => {
+      it('should be true for slices within the limit', () => {
+        expect(QuerySourceSparql.isLimitedTo(AF.createSlice(pattern, 5, 2), 2)).toBeTruthy();
+      });
+
+      it('should be false for slices beyond the limit', () => {
+        expect(QuerySourceSparql.isLimitedTo(AF.createSlice(pattern, 0, 3), 2)).toBeFalsy();
+      });
+
+      it('should be false for slices without limit', () => {
+        expect(QuerySourceSparql.isLimitedTo(AF.createSlice(pattern, 5), 2)).toBeFalsy();
+      });
+
+      it('should be false for other operations', () => {
+        expect(QuerySourceSparql.isLimitedTo(pattern, 2)).toBeFalsy();
+      });
+    });
+
+    it('should pass the restrictions in the context of requests', async() => {
+      const restrictions = [ resultRestriction, strictRateRestriction ];
+      const mediator = createPagingMediator(3);
+      source = createSource(mediator, { restrictions }, false);
+      const stream = source.queryBindings(pattern, ctx);
+      await expect(stream).toEqualBindingsStream(expectedBindings(3));
+      expect(mediator.mediate).toHaveBeenCalledTimes(1);
+      expect(mediator.mediate.mock.calls[0][0].context.get(KeysHttp.endpointRestrictions)).toBe(restrictions);
+      await expect(new Promise(resolve => stream.getProperty('metadata', resolve))).resolves.toEqual({
+        state: expect.any(MetadataValidationState),
+        cardinality: { type: 'estimate', value: Number.POSITIVE_INFINITY, dataset: url },
+        variables: [{ variable: DF.variable('p'), canBeUndef: false }],
+      });
+    });
+
+    it('should not pass empty restrictions in the context of requests', async() => {
+      const mediator = createPagingMediator(3);
+      source = createSource(mediator, { restrictions: []});
+      await expect(source.queryBindings(pattern, ctx)).toEqualBindingsStream(expectedBindings(3));
+      expect(mediator.mediate.mock.calls[0][0].context.has(KeysHttp.endpointRestrictions)).toBeFalsy();
+    });
+
+    it('should request results in pages until a page is incomplete', async() => {
+      const mediator = createPagingMediator(5);
+      source = createSource(mediator, { restrictions: [ resultRestriction ]});
+      await expect(source.queryBindings(pattern, ctx)).toEqualBindingsStream(expectedBindings(5));
+      expect(getQueries(mediator)).toEqual([
+        `SELECT ?p WHERE { ${patternQuery} } LIMIT 2`,
+        `SELECT ?p WHERE { ${patternQuery} } LIMIT 2 OFFSET 2`,
+        `SELECT ?p WHERE { ${patternQuery} } LIMIT 2 OFFSET 4`,
+      ]);
+    });
+
+    it('should request results in pages until a page is empty', async() => {
+      const mediator = createPagingMediator(4);
+      source = createSource(mediator, { restrictions: [ resultRestriction ]});
+      await expect(source.queryBindings(pattern, ctx)).toEqualBindingsStream(expectedBindings(4));
+      expect(mediator.mediate).toHaveBeenCalledTimes(3);
+    });
+
+    it('should stop requesting pages if the endpoint ignores the page size', async() => {
+      const mediator = createPagingMediator(5, true);
+      source = createSource(mediator, { restrictions: [ resultRestriction ]});
+      await expect(source.queryBindings(pattern, ctx)).toEqualBindingsStream(expectedBindings(5));
+      expect(mediator.mediate).toHaveBeenCalledTimes(1);
+    });
+
+    it('should request pages of projections without projecting them again', async() => {
+      const mediator = createPagingMediator(3);
+      source = createSource(mediator, { restrictions: [ resultRestriction ]});
+      const operation = AF.createProject(pattern, [ DF.variable('p') ]);
+      await expect(source.queryBindings(operation, ctx)).toEqualBindingsStream(expectedBindings(3));
+      expect(getQueries(mediator)).toEqual([
+        `SELECT ?p WHERE { ${patternQuery} } LIMIT 2`,
+        `SELECT ?p WHERE { ${patternQuery} } LIMIT 2 OFFSET 2`,
+      ]);
+    });
+
+    it('should not request pages for operations that are limited within the page size', async() => {
+      const mediator = createPagingMediator(5);
+      source = createSource(mediator, { restrictions: [ resultRestriction ]});
+      const operation = AF.createSlice(AF.createProject(pattern, [ DF.variable('p') ]), 0, 2);
+      await expect(source.queryBindings(operation, ctx)).toEqualBindingsStream(expectedBindings(2));
+      expect(mediator.mediate).toHaveBeenCalledTimes(1);
+      expect(getQueries(mediator)[0]).toContain('LIMIT 2');
+      expect(getQueries(mediator)[0]).not.toContain('OFFSET');
+    });
+
+    it('should emit the request time and skip count queries for strict rate limits', async() => {
+      const mediator = createPagingMediator(3);
+      source = createSource(mediator, { restrictions: [ strictRateRestriction ]}, true, true);
+      const stream = source.queryBindings(pattern, ctx);
+      await expect(new Promise(resolve => stream.getProperty('metadata', resolve))).resolves.toEqual({
+        state: expect.any(MetadataValidationState),
+        cardinality: { type: 'estimate', value: Number.POSITIVE_INFINITY, dataset: url },
+        requestTime: 60_000,
+        variables: [{ variable: DF.variable('p'), canBeUndef: false }],
+      });
+      await expect(stream).toEqualBindingsStream(expectedBindings(3));
+      expect(getQueries(mediator).some(isCountQuery)).toBeFalsy();
+    });
+
+    it('should emit the request time and send count queries for loose rate limits', async() => {
+      const mediator = createPagingMediator(3);
+      source = createSource(mediator, { restrictions: [ looseRateRestriction ]}, true, true);
+      const stream = source.queryBindings(pattern, ctx);
+      await expect(new Promise(resolve => stream.getProperty('metadata', resolve))).resolves.toEqual({
+        state: expect.any(MetadataValidationState),
+        cardinality: { type: 'exact', value: 3, dataset: url },
+        requestTime: 1_000,
+        variables: [{ variable: DF.variable('p'), canBeUndef: false }],
+      });
+      await expect(stream).toEqualBindingsStream(expectedBindings(3));
+      expect(getQueries(mediator).some(isCountQuery)).toBeTruthy();
+    });
+
+    it('should emit the request time if metadata cannot be determined', async() => {
+      const mediator = createPagingMediator(3);
+      source = createSource(mediator, { restrictions: [ looseRateRestriction ]}, true, true);
+      jest.spyOn(source, 'operationToNormalizedCountQuery').mockRejectedValue(new Error('count error'));
+      const stream = source.queryBindings(pattern, ctx);
+      await expect(new Promise(resolve => stream.getProperty('metadata', resolve))).resolves.toEqual({
+        state: expect.any(MetadataValidationState),
+        cardinality: { type: 'estimate', value: Number.POSITIVE_INFINITY, dataset: url },
+        requestTime: 1_000,
+        variables: [],
+      });
     });
   });
 });

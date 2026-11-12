@@ -1,4 +1,4 @@
-import type { ILinkQueue } from '@comunica/bus-rdf-resolve-hypermedia-links-queue';
+import type { IActionQuerySourceDereferenceLink } from '@comunica/bus-query-source-dereference-link';
 import { KeysStatistics } from '@comunica/context-entries';
 import type {
   ILink,
@@ -7,20 +7,22 @@ import type {
   MetadataBindings,
   IQueryBindingsOptions,
   IStatisticBase,
+  ILinkQueue,
+  ICachePolicy,
 } from '@comunica/types';
+import type { Algebra } from '@comunica/utils-algebra';
+import { seekBindingsStream } from '@comunica/utils-iterator';
 import { MetadataValidationState } from '@comunica/utils-metadata';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator, BufferedIteratorOptions } from 'asynciterator';
 import { BufferedIterator } from 'asynciterator';
-import type { Algebra } from 'sparqlalgebrajs';
 
 export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<RDF.Bindings> {
   protected readonly operation: Algebra.Operation;
   protected readonly queryBindingsOptions: IQueryBindingsOptions | undefined;
   protected readonly context: IActionContext;
 
-  private readonly cacheSize: number;
-  protected readonly firstUrl: string;
+  protected readonly firstLink: ILink;
   private readonly maxIterators: number;
   private readonly sourceStateGetter: SourceStateGetter;
 
@@ -31,24 +33,24 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
   // eslint-disable-next-line unicorn/no-useless-undefined
   private accumulatedMetadata: Promise<MetadataBindings | undefined> = Promise.resolve(undefined);
   private preflightMetadata: Promise<MetadataBindings> | undefined;
+  private seekTarget: RDF.Bindings | undefined;
+  private sourcesStarted = 0;
 
   public constructor(
-    cacheSize: number,
     operation: Algebra.Operation,
     queryBindingsOptions: IQueryBindingsOptions | undefined,
     context: IActionContext,
-    firstUrl: string,
+    firstLink: ILink,
     maxIterators: number,
     sourceStateGetter: SourceStateGetter,
     options?: BufferedIteratorOptions,
   ) {
     super({ autoStart: false, ...options });
     this._reading = false;
-    this.cacheSize = cacheSize;
     this.operation = operation;
     this.queryBindingsOptions = queryBindingsOptions;
     this.context = context;
-    this.firstUrl = firstUrl;
+    this.firstLink = firstLink;
     this.maxIterators = maxIterators;
     this.sourceStateGetter = sourceStateGetter;
 
@@ -66,23 +68,42 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
     }
   }
 
+  /**
+   * Skip ahead to the first binding that is not before the given one.
+   * This is only meaningful when this iterator reports a `termOrder` in its metadata.
+   * Calling this is considered a hint, and may potentially do nothing if the source prefers.
+   * @param target The binding to skip to.
+   */
+  public seek(target: RDF.Bindings): void {
+    // Remembered so that a source started after this call also skips ahead.
+    this.seekTarget = target;
+    for (const iterator of this.currentIterators) {
+      seekBindingsStream(iterator, target);
+    }
+  }
+
   public override getProperty<P>(propertyName: string, callback?: (value: P) => void): P | undefined {
     if (propertyName === 'metadata' && !this.started) {
       // If the iterator has not started yet, forcefully fetch the metadata from the source without starting the
       // iterator. This way, we keep the iterator lazy.
       if (!this.preflightMetadata) {
         this.preflightMetadata = new Promise((resolve, reject) => {
-          this.sourceStateGetter({ url: this.firstUrl }, {})
+          this.sourceStateGetter(this.firstLink, {})
             .then((sourceState) => {
               // Don't pass query options, as we don't want to consume any passed iterators
-              const bindingsStream = sourceState.source.queryBindings(this.operation, this.context);
+              const bindingsStream = sourceState.source
+                .queryBindings(this.operation, this.getSourceContext(sourceState));
               bindingsStream.getProperty('metadata', (metadata: MetadataBindings) => {
                 metadata.state = new MetadataValidationState();
                 bindingsStream.destroy();
                 this.accumulateMetadata(sourceState.metadata, metadata)
-                  .then((accumulatedMetadata) => {
+                  .then(async(accumulatedMetadata) => {
                     // Also merge fields that were not explicitly accumulated
                     const returnMetadata = { ...sourceState.metadata, ...metadata, ...accumulatedMetadata };
+                    // Probing for links is only worth its cost when there is an order at stake.
+                    if (isOrdered(returnMetadata) && await this.hasSourceLinksCached(sourceState, returnMetadata)) {
+                      dropOrder(returnMetadata);
+                    }
                     resolve(returnMetadata);
                   })
                   .catch(() => {
@@ -124,6 +145,26 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
    */
   protected abstract getSourceLinks(metadata: Record<string, any>, startSource: ISourceState): Promise<ILink[]>;
 
+  /**
+   * This checks if there are links that can be followed from a source with the given metadata.
+   * Unlike {@link LinkedRdfSourcesAsyncRdfIterator#getSourceLinks} this has no side-effects,
+   * and leaves the iterator lazy and sources undiscovered.
+   * @param _metadata The metadata of a source.
+   */
+  protected async hasSourceLinks(_metadata: Record<string, any>): Promise<boolean> {
+    return true;
+  }
+
+  /**
+   * A cached version of {@link LinkedRdfSourcesAsyncRdfIterator#hasSourceLinks}.
+   * @param sourceState The state of the source.
+   * @param metadata The metadata of the source.
+   */
+  protected hasSourceLinksCached(sourceState: ISourceState, metadata: Record<string, any>): Promise<boolean> {
+    sourceState.hasSourceLinks ??= this.hasSourceLinks(metadata);
+    return sourceState.hasSourceLinks;
+  }
+
   public override _read(count: number, done: () => void): void {
     if (this.started) {
       // Read from all current iterators
@@ -147,20 +188,18 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
         // We can safely ignore skip catching the error, since we are guaranteed to have
         // successfully got the source for this.firstUrl before.
         // eslint-disable-next-line ts/no-floating-promises
-        this.sourceStateGetter({ url: this.firstUrl }, {})
+        this.sourceStateGetter(this.firstLink, {})
           .then((sourceState) => {
             this.startIteratorsForNextUrls(sourceState.handledDatasets, false);
-            done();
           });
-      } else {
-        done();
       }
+      done();
     } else {
       // The first time this is called, prepare the first source
       this.started = true;
 
       // Await the source to be set, and start the source iterator
-      this.sourceStateGetter({ url: this.firstUrl }, {})
+      this.sourceStateGetter(this.firstLink, {})
         .then((sourceState) => {
           this.startIterator(sourceState);
           done();
@@ -195,6 +234,15 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
   ): Promise<MetadataBindings>;
 
   /**
+   * Determine the context for querying the given source,
+   * which contains the context of the source's link, as sources may be shared across queries with different contexts.
+   * @param sourceState A source state.
+   */
+  protected getSourceContext(sourceState: ISourceState): IActionContext {
+    return sourceState.link.context ? this.context.merge(sourceState.link.context) : this.context;
+  }
+
+  /**
    * Start a new iterator for the given source.
    * Once the iterator is done, it will either determine a new source, or it will close the linked iterator.
    * @param {ISourceState} startSource The start source state.
@@ -202,8 +250,13 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
   protected startIterator(startSource: ISourceState): void {
     // Delegate the quad pattern query to the given source
     try {
-      const iterator = startSource.source.queryBindings(this.operation, this.context, this.queryBindingsOptions);
+      const iterator = startSource.source
+        .queryBindings(this.operation, this.getSourceContext(startSource), this.queryBindingsOptions);
       this.currentIterators.push(iterator);
+      this.sourcesStarted++;
+      if (this.seekTarget) {
+        seekBindingsStream(iterator, this.seekTarget);
+      }
       let receivedEndEvent = false;
       let receivedMetadata = false;
 
@@ -245,16 +298,11 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
               // Create new metadata state
               returnMetadata.state = new MetadataValidationState();
 
-              // Emit metadata, and invalidate any metadata that was set before
-              this.updateMetadata(returnMetadata);
-
-              // Invalidate any preflight metadata
-              if (this.preflightMetadata) {
-                this.preflightMetadata
-                  .then(metadataIn => metadataIn.state.invalidate())
-                  .catch(() => {
-                    // Ignore errors
-                  });
+              // Order is only kept for single sources.
+              // For multiple sources, order is emitted once all links are known.
+              const ordered = isOrdered(returnMetadata);
+              if (!ordered) {
+                this.emitMetadata(returnMetadata);
               }
 
               // Determine next urls, which will eventually become a next-next source.
@@ -265,6 +313,13 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
                   const linkQueue = await this.getLinkQueue();
                   for (const nextUrl of nextUrls) {
                     linkQueue.push(nextUrl, startSource.link);
+                  }
+
+                  if (ordered) {
+                    if (this.sourcesStarted > 1 || !linkQueue.isEmpty()) {
+                      dropOrder(returnMetadata);
+                    }
+                    this.emitMetadata(returnMetadata);
                   }
 
                   receivedMetadata = true;
@@ -283,6 +338,20 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
       });
     } catch (syncError: unknown) {
       this.destroy(<Error> syncError);
+    }
+  }
+
+  /**
+   * Publish metadata, and invalidate whatever was published before it.
+   */
+  protected emitMetadata(metadata: MetadataBindings): void {
+    this.updateMetadata(metadata);
+    if (this.preflightMetadata) {
+      this.preflightMetadata
+        .then(metadataIn => metadataIn.state.invalidate())
+        .catch(() => {
+          // Ignore errors
+        });
     }
   }
 
@@ -350,6 +419,23 @@ export abstract class LinkedRdfSourcesAsyncRdfIterator extends BufferedIterator<
 }
 
 /**
+ * Whether metadata makes a claim about the order of its bindings.
+ */
+function isOrdered(metadata: MetadataBindings): boolean {
+  return Boolean(metadata.order ?? metadata.termOrder ?? metadata.availableOrders);
+}
+
+/**
+ * Withdraw a claim about the order of the bindings, and with it the ability to skip within that order.
+ */
+function dropOrder(metadata: MetadataBindings): void {
+  metadata.order = undefined;
+  metadata.termOrder = undefined;
+  metadata.availableOrders = undefined;
+  metadata.canSeek = undefined;
+}
+
+/**
  * The current state of a source.
  * This is needed for following links within a source.
  */
@@ -370,6 +456,15 @@ export interface ISourceState {
    * All dataset identifiers that have been passed for this source.
    */
   handledDatasets: Record<string, boolean>;
+  /**
+   * The cache policy of the request's response.
+   */
+  cachePolicy?: ICachePolicy<IActionQuerySourceDereferenceLink>;
+  /**
+   * Whether links can be followed from this source, once probed.
+   * This assumes that the links of a source do not depend on the operation it is queried with.
+   */
+  hasSourceLinks?: Promise<boolean>;
 }
 
 export type SourceStateGetter = (link: ILink, handledDatasets: Record<string, boolean>) => Promise<ISourceState>;

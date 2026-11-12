@@ -1,6 +1,6 @@
 # Comunica Term Function Sha384 Function Factory Actor
 
-[![npm version](https://badge.fury.io/js/%40comunica%2Factor-function-factory-term-function-sha384.svg)](https://www.npmjs.com/package/@comunica/actor-function-factory-term-function-sha384)
+[![npm version](https://badge.fury.io/js/%40comunica%2Factor-function-factory-term-sha384.svg)](https://www.npmjs.com/package/@comunica/actor-function-factory-term-sha384)
 
 A [function factory](https://github.com/comunica/comunica/tree/master/packages/bus-function-factory) actor
 that constructs a [term function](https://github.com/comunica/comunica/tree/master/packages/bus-function-factory/lib/ActorFunctionFactory.ts)
@@ -14,7 +14,7 @@ and should only be used by [developers that want to build their own query engine
 ## Install
 
 ```bash
-$ yarn add @comunica/actor-function-factory-term-function-sha384
+$ yarn add @comunica/actor-function-factory-term-sha384
 ```
 
 ## Configure
@@ -24,7 +24,7 @@ After installing, this package can be added to your engine's configuration as fo
 {
   "@context": [
     ...
-    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-function-factory-term-function-sha384/^4.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-function-factory-term-function-sha384/^5.0.0/components/context.jsonld"
   ],
   "actors": [
     ...

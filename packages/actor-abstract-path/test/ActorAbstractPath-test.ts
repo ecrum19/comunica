@@ -1,17 +1,17 @@
 import { Actor, Bus } from '@comunica/core';
 import type { IQuerySourceWrapper } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import { assignOperationSource } from '@comunica/utils-query-operation';
 import { DataFactory } from 'rdf-data-factory';
 import { termToString } from 'rdf-string';
-import { Factory } from 'sparqlalgebrajs';
 import { ActorAbstractPath } from '../lib/ActorAbstractPath';
 
 const DF = new DataFactory();
-const AF = new Factory();
+const AF = new AlgebraFactory();
 
 describe('ActorAbstractPath', () => {
   const bus = new Bus({ name: 'bus' });
-  const factory: Factory = new Factory();
+  const factory: AlgebraFactory = new AlgebraFactory();
 
   describe('The ActorAbstractPath module', () => {
     it('should be a function', () => {
@@ -44,6 +44,16 @@ describe('ActorAbstractPath', () => {
         DF.variable('b'),
       );
       expect(termToString(actor.generateVariable(DF, path))).not.toEqual(path.object.value);
+    });
+
+    it('generates a variable that differs from the graph', () => {
+      const path = factory.createPath(
+        DF.variable('s'),
+        factory.createLink(DF.namedNode('p')),
+        DF.variable('o'),
+        DF.variable('b'),
+      );
+      expect(actor.generateVariable(DF, path)).toEqual(DF.variable('bb'));
     });
 
     describe('getPathSources', () => {
@@ -93,6 +103,14 @@ describe('ActorAbstractPath', () => {
         )).toEqual([
           source1,
         ]);
+      });
+
+      it('throws on unknown type', () => {
+        const noLink = AF.createLink(DF.namedNode('a'));
+        noLink.type = <any> 'unknown type';
+        expect(() => actor.getPathSources(
+          assignOperationSource(noLink, source1),
+        )).toThrow(`Can not extract path sources from operation of type`);
       });
 
       it('throws on link without source', () => {

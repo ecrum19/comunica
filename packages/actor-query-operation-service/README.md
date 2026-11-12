@@ -2,8 +2,15 @@
 
 [![npm version](https://badge.fury.io/js/%40comunica%2Factor-query-operation-service.svg)](https://www.npmjs.com/package/@comunica/actor-query-operation-service)
 
-A [Query Operation](https://github.com/comunica/comunica/tree/master/packages/bus-query-operation) actor that handles [SPARQL `ASK`](https://www.w3.org/TR/sparql11-query/#ask) operations
-by setting the given service target as source in the context.
+A [Query Operation](https://github.com/comunica/comunica/tree/master/packages/bus-query-operation) actor
+that handles SPARQL `SERVICE` clauses of which the target is a variable.
+
+`SERVICE` clauses with an IRI target are rewritten into source-annotated operations by
+[`@comunica/actor-optimize-query-operation-assign-sources-exhaustive`](https://github.com/comunica/comunica/tree/master/packages/actor-optimize-query-operation-assign-sources-exhaustive).
+
+Variable targets are disabled by default, as the queried data then determines what is dereferenced,
+which is problematic when queries originate from untrusted parties.
+They can be enabled via the `serviceAllowVariableTargets` context entry.
 
 This module is part of the [Comunica framework](https://github.com/comunica/comunica),
 and should only be used by [developers that want to build their own query engine](https://comunica.dev/docs/modify/).
@@ -23,7 +30,7 @@ After installing, this package can be added to your engine's configuration as fo
 {
   "@context": [
     ...
-    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-query-operation-service/^4.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-query-operation-service/^5.0.0/components/context.jsonld"
   ],
   "actors": [
     ...
@@ -31,7 +38,7 @@ After installing, this package can be added to your engine's configuration as fo
       "@id": "urn:comunica:default:query-operation/actors#service",
       "@type": "ActorQueryOperationService",
       "mediatorQueryOperation": { "@id": "urn:comunica:default:query-operation/mediators#main" },
-      "forceSparqlEndpoint": false,
+      "mediatorQuerySourceIdentify": { "@id": "urn:comunica:default:query-source-identify/mediators#main" },
       "mediatorMergeBindingsContext": { "@id": "urn:comunica:default:merge-bindings-context/mediators#main" }
     }
   ]
@@ -40,8 +47,7 @@ After installing, this package can be added to your engine's configuration as fo
 
 ### Config Parameters
 
-* `cacheSize`: The number of service clause targets to cache, to avoid repetitive source identification. Defaults to `32`.
-* `httpInvalidator`: A mediator over the [HTTP invalidate bus](https://github.com/comunica/comunica/tree/master/packages/bus-http-invalidate).
 * `mediatorQueryOperation`: A mediator over the [Query Operation bus](https://github.com/comunica/comunica/tree/master/packages/bus-query-operation).
-* `forceSparqlEndpoint`: Optional flag indicating if the SERVICE target should be assumed to be a SPARQL endpoint, defaults to `false`.
+* `mediatorQuerySourceIdentify`: A mediator over the [Query Source Identify bus](https://github.com/comunica/comunica/tree/master/packages/bus-query-source-identify).
 * `mediatorMergeBindingsContext`: A mediator over the [Merge Bindings Context bus](https://github.com/comunica/comunica/tree/master/packages/bus-merge-bindings-context).
+* `forceSparqlEndpoint`: If the SERVICE target should be assumed to be a SPARQL endpoint, defaults to `false`.

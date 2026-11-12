@@ -1,6 +1,6 @@
 import { KeysMergeBindingsContext } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
-import type { IActionContext, IQueryOperationResultBindings } from '@comunica/types';
+import type { IActionContext, IQueryOperationResultBindings, IQueryOperationResultQuads } from '@comunica/types';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import type { Bindings } from '@comunica/utils-bindings-factory';
 import { ArrayIterator } from 'asynciterator';
@@ -54,7 +54,7 @@ describe('ActorQueryProcessAnnotateSourceBinding', () => {
 
       mediatorQueryProcess = {
         async mediate() {
-          return { result: { type: 'bindings', bindingsStream: new ArrayIterator([ bindings ]) }};
+          return { result: { type: 'bindings', bindingsStream: new ArrayIterator([ bindings ], { autoStart: false }) }};
         },
       };
       const actorWithSource = new ActorQueryProcessAnnotateSourceBinding({ name: 'actor', bus, mediatorQueryProcess });
@@ -76,14 +76,14 @@ describe('ActorQueryProcessAnnotateSourceBinding', () => {
 
       mediatorQueryProcess = {
         async mediate() {
-          return { result: { type: 'bindings', bindingsStream: new ArrayIterator([ bindings ]) }};
+          return { result: { type: 'bindings', bindingsStream: new ArrayIterator([ bindings ], { autoStart: false }) }};
         },
       };
       const actorWithSource = new ActorQueryProcessAnnotateSourceBinding({ name: 'actor', bus, mediatorQueryProcess });
 
       const queryResult = actorWithSource.run({ query: 'irrelevantQuery', context });
       expect((await queryResult).result.type).toBe('bindings');
-      await expect((< IQueryOperationResultBindings >(await queryResult).result).bindingsStream).toEqualBindingsStream([
+      await expect((<IQueryOperationResultBindings>(await queryResult).result).bindingsStream).toEqualBindingsStream([
         BF.fromRecord({
           v1: DF.namedNode('V1'),
           v2: DF.namedNode('V2'),
@@ -93,10 +93,40 @@ describe('ActorQueryProcessAnnotateSourceBinding', () => {
       ]);
     });
 
+    it('should not add source in context to quads', async() => {
+      bindings = bindings.setContextEntry(KeysMergeBindingsContext.sourcesBinding, [ 'S1' ]);
+
+      mediatorQueryProcess = {
+        async mediate() {
+          return { result: { type: 'quads', quadStream: new ArrayIterator([], { autoStart: false }) }};
+        },
+      };
+      const actorWithSource = new ActorQueryProcessAnnotateSourceBinding({ name: 'actor', bus, mediatorQueryProcess });
+
+      const queryResult = actorWithSource.run({ query: 'irrelevantQuery', context });
+      expect((await queryResult).result.type).toBe('quads');
+      await expect((<IQueryOperationResultQuads>(await queryResult).result).quadStream.toArray())
+        .resolves.toHaveLength(0);
+    });
+
     it('should fail gracefully when binding does not have context', async() => {
       mediatorQueryProcess = {
         async mediate() {
-          return { result: { type: 'bindings', bindingsStream: new ArrayIterator([ bindings ]) }};
+          return { result: { type: 'bindings', bindingsStream: new ArrayIterator([{}], { autoStart: false }) }};
+        },
+      };
+      const actorWithSource = new ActorQueryProcessAnnotateSourceBinding({ name: 'actor', bus, mediatorQueryProcess });
+
+      const queryResult = actorWithSource.run({ query: 'irrelevantQuery', context });
+      expect((await queryResult).result.type).toBe('bindings');
+      await expect((<IQueryOperationResultBindings>(await queryResult).result).bindingsStream.toArray())
+        .resolves.toHaveLength(1);
+    });
+
+    it('should fail gracefully when binding are of incorrect type', async() => {
+      mediatorQueryProcess = {
+        async mediate() {
+          return { result: { type: 'bindings', bindingsStream: new ArrayIterator([ bindings ], { autoStart: false }) }};
         },
       };
       const actorWithSource = new ActorQueryProcessAnnotateSourceBinding({ name: 'actor', bus, mediatorQueryProcess });
@@ -118,7 +148,7 @@ describe('ActorQueryProcessAnnotateSourceBinding', () => {
 
       mediatorQueryProcess = {
         async mediate() {
-          return { result: { type: 'bindings', bindingsStream: new ArrayIterator([ bindings ]) }};
+          return { result: { type: 'bindings', bindingsStream: new ArrayIterator([ bindings ], { autoStart: false }) }};
         },
       };
       const actorWithSource = new ActorQueryProcessAnnotateSourceBinding({ name: 'actor', bus, mediatorQueryProcess });

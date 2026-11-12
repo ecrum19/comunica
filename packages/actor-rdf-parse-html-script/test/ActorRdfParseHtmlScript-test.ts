@@ -30,6 +30,8 @@ describe('ActorRdfParseHtml', () => {
         mediaTypeFormats: {},
         name: 'jsonldParser',
         mediatorHttp,
+        httpInvalidator: <any> { addInvalidateListener: jest.fn() },
+        cacheSize: 10,
       },
     );
 
@@ -127,6 +129,21 @@ describe('ActorRdfParseHtml', () => {
         let listener: IHtmlParseListener;
         beforeEach(async() => {
           listener = (await actor.run(action)).htmlParseListener;
+        });
+
+        it('should identify the parsed script by the document base IRI', async() => {
+          jest.spyOn(mediator, 'mediate');
+          listener.onTagOpen('script', { type: 'application/ld+json' });
+          listener.onText(`{ "@id": "http://example.org/a", "http://example.org/b": "http://example.org/c" }`);
+          listener.onTagClose();
+          listener.onEnd();
+
+          await onEnd;
+
+          expect(mediator.mediate).toHaveBeenCalledWith(expect.objectContaining({
+            handle: expect.objectContaining({ url: 'http://example.org/' }),
+            handleMediaType: 'application/ld+json',
+          }));
         });
 
         it('should handle a jsonld script tag', async() => {

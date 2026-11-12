@@ -33,6 +33,8 @@ export class BusIndexed<A extends Actor<I, T, O, any>, I extends IAction, T exte
    */
   public constructor(args: IBusIndexedArgs) {
     super(args);
+    this.actorIdentifierFields = args.actorIdentifierFields;
+    this.actionIdentifierFields = args.actionIdentifierFields;
   }
 
   public override subscribe(actor: A): void {
@@ -44,6 +46,16 @@ export class BusIndexed<A extends Actor<I, T, O, any>, I extends IAction, T exte
       }
       actors.push(actor);
       super.subscribe(actor);
+    }
+  }
+
+  public override reorderForDependencies(): void {
+    super.reorderForDependencies();
+    // Also ensure actors in the index are ordered.
+    if (this.dependencyLinks.size > 0) {
+      for (const actors of Object.values(this.actorsIndex)) {
+        actors.sort((left, right) => this.actors.indexOf(left) - this.actors.indexOf(right));
+      }
     }
   }
 

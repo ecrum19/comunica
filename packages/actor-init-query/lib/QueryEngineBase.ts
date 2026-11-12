@@ -1,11 +1,13 @@
 import type { IActionSparqlSerialize, IActorQueryResultSerializeOutput } from '@comunica/bus-query-result-serialize';
-import { KeysInitQuery } from '@comunica/context-entries';
-import { ActionContext } from '@comunica/core';
+import { KeysCore, KeysInitQuery, KeysQueryOperation } from '@comunica/context-entries';
+import { ActionContext, ActionContextKey } from '@comunica/core';
 import type {
   IActionContext,
   IQueryOperationResult,
   IQueryEngine,
   IQueryExplained,
+  IQuadUpdate,
+  IRdfParseOptions,
   QueryFormatType,
   QueryType,
   QueryExplainMode,
@@ -16,10 +18,25 @@ import type {
   IQueryQuadsEnhanced,
   QueryEnhanced,
   IQueryContextCommon,
+  IWarmupOptionsBounded,
+  IWarmupResult,
+  QuerySourceUnidentified,
 } from '@comunica/types';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
 import type { ActorInitQueryBase } from './ActorInitQueryBase';
+
+/**
+ * The shortcut under which the explain mode may be passed in a raw query context.
+ * @see KeysInitQuery.explain
+ */
+const KEY_CONTEXT_EXPLAIN_SHORTCUT = new ActionContextKey<QueryExplainMode>('explain');
+
+/**
+ * The shortcut under which the sources may be passed in a raw query context.
+ * @see KeysInitQuery.querySourcesUnidentified
+ */
+const KEY_CONTEXT_SOURCES_SHORTCUT = new ActionContextKey<QuerySourceUnidentified[]>('sources');
 
 /**
  * Base implementation of a Comunica query engine.
@@ -124,7 +141,15 @@ implements IQueryEngine<QueryStringContextInner, QueryAlgebraContextInner> {
     query: QueryFormatTypeInner,
     context?: QueryFormatTypeInner extends string ? QueryStringContextInner : QueryAlgebraContextInner,
   ): Promise<QueryType | IQueryExplained> {
-    const actionContext: IActionContext = ActionContext.ensureActionContext(context);
+    let actionContext: IActionContext = ActionContext.ensureActionContext(context);
+
+    // The explain mode determines which query processor handles the query, so unlike the other context
+    // shortcuts, it cannot wait for the context preprocessing that happens during query processing.
+    if (actionContext.has(KEY_CONTEXT_EXPLAIN_SHORTCUT)) {
+      actionContext = actionContext
+        .set(KeysInitQuery.explain, actionContext.getSafe(KEY_CONTEXT_EXPLAIN_SHORTCUT))
+        .delete(KEY_CONTEXT_EXPLAIN_SHORTCUT);
+    }
 
     // Invalidate caches if cache argument is set to false
     if (actionContext.get(KeysInitQuery.invalidateCache)) {
@@ -137,6 +162,112 @@ implements IQueryEngine<QueryStringContextInner, QueryAlgebraContextInner> {
       return result;
     }
     return QueryEngineBase.internalToFinalResult(result);
+  }
+
+  /**
+   * Update the destination with the given quads and graphs, without serializing them into an update query.
+   * @param update The quads to insert and delete, and the graphs to delete and create.
+   * @param context A context, which determines the destination in the same way as for update queries.
+   * @return {Promise<void>} A promise that resolves when the destination has been updated.
+   */
+  public async updateQuads(update: IQuadUpdate, context?: Partial<QueryAlgebraContextInner>): Promise<void> {
+    const { mediatorContextPreprocess, mediatorUpdateQuads } = this.actorInitQuery;
+    if (!mediatorContextPreprocess || !mediatorUpdateQuads) {
+      throw new Error(
+        'Updating quads requires the query init actor to have a mediatorContextPreprocess and a mediatorUpdateQuads',
+      );
+    }
+
+    const actionContext = (await mediatorContextPreprocess.mediate({
+      context: ActionContext.ensureActionContext(context),
+      initialize: true,
+    })).context;
+    if (actionContext.get(KeysQueryOperation.readOnly)) {
+      throw new Error('Attempted a write operation in read-only mode');
+    }
+    if (actionContext.get(KeysInitQuery.invalidateCache)) {
+      await this.invalidateHttpCache();
+    }
+
+    const { execute } = await mediatorUpdateQuads.mediate({ ...update, context: actionContext });
+    await execute();
+    actionContext.get(KeysCore.log)?.flush();
+  }
+
+  /**
+   * Parse a stream of RDF with the parsers of this engine.
+   * @param stream A text stream in an RDF serialization.
+   * @param options The content type of the stream, and optional parsing and context options.
+   * @return A promise resolving to a stream of the parsed quads.
+   */
+  public async parseRdf(
+    stream: NodeJS.ReadableStream,
+    options: IRdfParseOptions & Partial<QueryAlgebraContextInner>,
+  ): Promise<RDF.Stream> {
+    const { mediatorContextPreprocess, mediatorRdfParse } = this.actorInitQuery;
+    if (!mediatorContextPreprocess || !mediatorRdfParse) {
+      throw new Error(
+        'Parsing RDF requires the query init actor to have a mediatorContextPreprocess and a mediatorRdfParse',
+      );
+    }
+    if (!options.contentType) {
+      throw new Error(`Missing 'contentType' option while parsing.`);
+    }
+
+    const context = (await mediatorContextPreprocess.mediate({
+      context: ActionContext.ensureActionContext(options),
+      initialize: true,
+    })).context;
+    if (context.get(KeysInitQuery.invalidateCache)) {
+      await this.invalidateHttpCache();
+    }
+
+    const { data } = (await mediatorRdfParse.mediate({
+      context,
+      handle: {
+        data: stream,
+        metadata: { baseIRI: options.baseIRI, version: options.version },
+        url: options.baseIRI ?? 'a stream',
+        context,
+      },
+      handleMediaType: options.contentType,
+    })).handle;
+    data.on('end', () => context.get(KeysCore.log)?.flush());
+    return data;
+  }
+
+  /**
+   * Warm up this engine by executing queries over the sources in the given context,
+   * so that the just-in-time compiler has optimized the engine before it handles actual queries.
+   * The warm-up does not modify the sources.
+   * @param context A context, which determines the sources in the same way as for queries.
+   * @param options The maximum number of query executions and duration, and a signal to stop early.
+   *                At least one of them is required.
+   * @return A promise resolving to the number of query executions.
+   */
+  public async warmup(context: QueryStringContextInner, options: IWarmupOptionsBounded): Promise<IWarmupResult> {
+    const { mediatorWarmup } = this.actorInitQuery;
+    if (!mediatorWarmup) {
+      throw new Error('Warming up requires the query init actor to have a mediatorWarmup');
+    }
+    if (options?.executions === undefined && options?.budget === undefined && options?.signal === undefined) {
+      throw new Error('Warming up requires a maximum number of executions, a budget, or a signal');
+    }
+    let actionContext = ActionContext.ensureActionContext(context).set(KeysQueryOperation.readOnly, true);
+    // Like the explain mode, warm-up actors need the sources before the context preprocessing of query processing
+    if (actionContext.has(KEY_CONTEXT_SOURCES_SHORTCUT)) {
+      actionContext = actionContext
+        .set(KeysInitQuery.querySourcesUnidentified, actionContext.getSafe(KEY_CONTEXT_SOURCES_SHORTCUT))
+        .delete(KEY_CONTEXT_SOURCES_SHORTCUT);
+    }
+    const { executions } = await mediatorWarmup.mediate({
+      engine: this,
+      context: actionContext,
+      executions: options.executions,
+      budget: options.budget,
+      signal: options.signal,
+    });
+    return { executions };
   }
 
   /**
@@ -204,11 +335,17 @@ implements IQueryEngine<QueryStringContextInner, QueryAlgebraContextInner> {
    * @param internalResult An intermediary query result.
    */
   public static internalToFinalResult(internalResult: IQueryOperationResult): QueryType {
+    const logger = internalResult.context?.get(KeysCore.log);
     switch (internalResult.type) {
       case 'bindings':
         return {
           resultType: 'bindings',
-          execute: async() => internalResult.bindingsStream,
+          execute: async() => {
+            if (logger) {
+              internalResult.bindingsStream.on?.('end', () => logger.flush());
+            }
+            return internalResult.bindingsStream;
+          },
           metadata: async() => {
             const meta = <any> await internalResult.metadata();
             meta.variables = meta.variables.map((variable: any) => variable.variable);
@@ -219,20 +356,33 @@ implements IQueryEngine<QueryStringContextInner, QueryAlgebraContextInner> {
       case 'quads':
         return {
           resultType: 'quads',
-          execute: async() => internalResult.quadStream,
+          execute: async() => {
+            if (logger) {
+              internalResult.quadStream.on?.('end', () => logger.flush());
+            }
+            return internalResult.quadStream;
+          },
           metadata: async() => <any> await internalResult.metadata(),
           context: internalResult.context,
         };
       case 'boolean':
         return {
           resultType: 'boolean',
-          execute: async() => internalResult.execute(),
+          execute: async() => {
+            const result = await internalResult.execute();
+            logger?.flush();
+            return result;
+          },
           context: internalResult.context,
         };
       case 'void':
         return {
           resultType: 'void',
-          execute: async() => internalResult.execute(),
+          execute: async() => {
+            const result = await internalResult.execute();
+            logger?.flush();
+            return result;
+          },
           context: internalResult.context,
         };
     }

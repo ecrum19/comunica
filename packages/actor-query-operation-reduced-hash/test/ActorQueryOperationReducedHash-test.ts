@@ -25,14 +25,14 @@ describe('ActorQueryOperationReducedHash', () => {
           BF.bindings([[ DF.variable('a'), DF.literal('3') ]]),
           BF.bindings([[ DF.variable('a'), DF.literal('3') ]]),
           BF.bindings([[ DF.variable('a'), DF.literal('2') ]]),
-        ]),
+        ], { autoStart: false }),
         metadata: () => Promise.resolve({ cardinality: 5, variables: [ DF.variable('a') ]}),
         operated: arg,
         type: 'bindings',
       }),
     };
     mediatorHashBindings = {
-      mediate: () => Promise.resolve({ hashFunction: (bindings: any) => JSON.stringify(bindings) }),
+      mediate: () => Promise.resolve({ hashFunction: (bindings: any) => bindings.toString() }),
     };
     cacheSize = 20;
   });
@@ -135,14 +135,14 @@ describe('Smaller cache than number of queries', () => {
           BF.bindings([[ DF.variable('a'), DF.literal('2') ]]),
           BF.bindings([[ DF.variable('a'), DF.literal('2') ]]),
           BF.bindings([[ DF.variable('a'), DF.literal('1') ]]),
-        ]),
+        ], { autoStart: false }),
         metadata: () => Promise.resolve({ cardinality: 7, variables: [ DF.variable('a') ]}),
         operated: arg,
         type: 'bindings',
       }),
     };
     mediatorHashBindings = {
-      mediate: () => Promise.resolve({ hashFunction: (bindings: any) => JSON.stringify(bindings) }),
+      mediate: () => Promise.resolve({ hashFunction: (bindings: any) => bindings.toString() }),
     };
     actor = new ActorQueryOperationReducedHash(
       { name: 'actor', bus, mediatorQueryOperation, mediatorHashBindings, cacheSize },

@@ -12,10 +12,10 @@
   "queryRecurrence": 1,
   "generateHdt": false,
   "endpointUrl": "http://localhost:3001/sparql",
-  "queryRunnerReplication": 3,
+  "queryRunnerReplication": 5,
   "queryRunnerWarmupRounds": 1,
   "queryRunnerRequestDelay": 0,
   "queryRunnerEndpointAvailabilityCheckTimeout": 1000,
   "queryRunnerUrlParams": {},
-  "hookSparqlEndpoint": {"@id": "urn:jbr:benchmark-watdiv-file:combination_0:hookSparqlEndpoint","@type": "HookCli","entrypoint": [  "node",  "../../engines/query-sparql-file/bin/http.js",  "file@generated/dataset.nt",  "-p",  "3001",  "-t",  "500"],"statsFilePath": "output/stats.csv"  }
+  "hookSparqlEndpoint": {"@id": "urn:jbr:benchmark-watdiv-file:combination_0:hookSparqlEndpoint","@type": "HookCli","entrypoint": [  "node",  "../../engines/query-sparql-file/bin/http.js",  "file@generated/dataset.nt",  "-p",  "3001",  "-t",  "500",  "--warmup",  "2000"],"statsFilePath": "output/stats.csv"  }
 }

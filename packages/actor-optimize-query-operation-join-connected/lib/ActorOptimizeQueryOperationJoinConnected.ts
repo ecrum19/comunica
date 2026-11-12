@@ -7,8 +7,7 @@ import { KeysInitQuery } from '@comunica/context-entries';
 import type { IActorTest, TestResult } from '@comunica/core';
 import { passTestVoid } from '@comunica/core';
 import type { ComunicaDataFactory } from '@comunica/types';
-import type { Algebra } from 'sparqlalgebrajs';
-import { Util, Factory } from 'sparqlalgebrajs';
+import { Algebra, algebraUtils, AlgebraFactory } from '@comunica/utils-algebra';
 
 /**
  * A comunica Join Connected Optimize Query Operation Actor.
@@ -20,16 +19,13 @@ export class ActorOptimizeQueryOperationJoinConnected extends ActorOptimizeQuery
 
   public async run(action: IActionOptimizeQueryOperation): Promise<IActorOptimizeQueryOperationOutput> {
     const dataFactory: ComunicaDataFactory = action.context.getSafe(KeysInitQuery.dataFactory);
-    const algebraFactory = new Factory(dataFactory);
+    const factory = new AlgebraFactory(dataFactory);
 
-    const operation = Util.mapOperation(action.operation, {
-      join(op: Algebra.Join, factory: Factory) {
-        return {
-          recurse: false,
-          result: ActorOptimizeQueryOperationJoinConnected.cluster(op, factory),
-        };
+    const operation = algebraUtils.mapOperation(action.operation, {
+      [Algebra.Types.JOIN]: {
+        transform: op => ActorOptimizeQueryOperationJoinConnected.cluster(op, factory),
       },
-    }, algebraFactory);
+    });
     return { operation, context: action.context };
   }
 
@@ -38,12 +34,15 @@ export class ActorOptimizeQueryOperationJoinConnected extends ActorOptimizeQuery
    * @param op A join operation.
    * @param factory An algebra factory.
    */
-  public static cluster(op: Algebra.Join, factory: Factory): Algebra.Operation {
-    // Initialize each entry to be in a separate cluster
-    const initialClusters: IJoinCluster[] = op.input.map(subOp => ({
-      inScopeVariables: Object.fromEntries(Util.inScopeVariables(subOp).map(variable => [ variable.value, true ])),
-      entries: [ subOp ],
-    }));
+  public static cluster(op: Algebra.Join, factory: AlgebraFactory): Algebra.Operation {
+    // Initialize each entry to be in a separate cluster, after flattening nested joins
+    const initialClusters: IJoinCluster[] = op.input
+      .flatMap(subOp => algebraUtils.isKnownOperation(subOp, Algebra.Types.JOIN) ? subOp.input : [ subOp ])
+      .map(subOp => ({
+        inScopeVariables: Object.fromEntries(algebraUtils.inScopeVariables(subOp)
+          .map(variable => [ variable.value, true ])),
+        entries: [ subOp ],
+      }));
 
     // Iteratively merge clusters until they don't change anymore
     let oldClusters: IJoinCluster[];

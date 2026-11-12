@@ -5,6 +5,7 @@ import { KeysInitQuery, KeysQueryOperation } from '@comunica/context-entries';
 import { ActionContext } from '@comunica/core';
 import { LoggerPretty } from '@comunica/logger-pretty';
 import type { BindingsStream } from '@comunica/types';
+import { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { stringify as stringifyStream } from '@jeswr/stream-to-string';
 import type * as RDF from '@rdfjs/types';
@@ -12,7 +13,6 @@ import arrayifyStream from 'arrayify-stream';
 import { ArrayIterator } from 'asynciterator';
 import { DataFactory } from 'rdf-data-factory';
 import { Readable } from 'readable-stream';
-import { translate } from 'sparqlalgebrajs';
 
 // @ts-expect-error
 import { QueryEngineFactoryBase, QueryEngineBase } from '../__mocks__';
@@ -67,6 +67,15 @@ const argsDefault = {
 };
 
 const DF = new DataFactory();
+
+const bgp = { type: Algebra.Types.BGP, patterns: []};
+const ask = { type: Algebra.Types.ASK, input: bgp };
+const from = {
+  type: Algebra.Types.FROM,
+  input: ask,
+  default: [ DF.namedNode('http://example.org/g1') ],
+  named: [ DF.namedNode('http://example.org/n1'), DF.namedNode('http://example.org/n2') ],
+};
 const BF = new BindingsFactory(DF);
 
 describe('HttpServiceSparqlEndpoint', () => {
@@ -111,6 +120,19 @@ describe('HttpServiceSparqlEndpoint', () => {
       expect(instance.context).toEqual({});
       expect(instance.timeout).toBe(60_000);
       expect(instance.port).toBe(3_000);
+    });
+
+    it('should expose the engine from args if present', async() => {
+      const engine = <any> { engineFromArgs: true };
+      const instance = new HttpServiceSparqlEndpoint({ ...argsDefault, engine });
+
+      await expect(instance.engine).resolves.toBe(engine);
+    });
+
+    it('should create an engine if none is present in args', async() => {
+      const instance = new HttpServiceSparqlEndpoint({ ...argsDefault });
+
+      await expect(instance.engine).resolves.toHaveProperty('invalidateHttpCache');
     });
   });
 
@@ -345,6 +367,31 @@ describe('HttpServiceSparqlEndpoint', () => {
         .toMatchObject({ configPath: defaultConfigPath, mainModulePath: moduleRootPath });
     });
 
+    it('should not warm up by default', async() => {
+      await expect(HttpServiceSparqlEndpoint.generateConstructorArguments(
+        testCommandlineArguments,
+        moduleRootPath,
+        env,
+        defaultConfigPath,
+        stderr,
+        exit,
+        [],
+      )).resolves.toMatchObject({ warmup: 0 });
+    });
+
+    it('should take the number of warm-up executions from the commandline arguments', async() => {
+      testCommandlineArguments.push('--warmup', '100');
+      await expect(HttpServiceSparqlEndpoint.generateConstructorArguments(
+        testCommandlineArguments,
+        moduleRootPath,
+        env,
+        defaultConfigPath,
+        stderr,
+        exit,
+        [],
+      )).resolves.toMatchObject({ warmup: 100 });
+    });
+
     it('should use logger from given context if available', async() => {
       fs.existsSync.mockReturnValue(false);
       const context = { ...testArgumentDict, log: new LoggerPretty({ level: 'test_loglevel' }) };
@@ -550,6 +597,46 @@ describe('HttpServiceSparqlEndpoint', () => {
           .toHaveBeenCalledWith(instance, await instance.engine, variants, stdout, stderr);
       });
 
+      it('should not warm up by default', async() => {
+        jest.spyOn(instance, 'warmUp');
+        await instance.run(stdout, stderr);
+
+        expect(instance.warmUp).not.toHaveBeenCalled();
+      });
+
+      it('should warm up before creating the server', async() => {
+        (<any> instance).warmup = 5;
+        jest.spyOn(instance, 'warmUp').mockResolvedValue();
+        await instance.run(stdout, stderr);
+
+        expect(instance.warmUp).toHaveBeenCalledWith(await instance.engine, stderr);
+        expect(jest.mocked(instance.warmUp).mock.invocationCallOrder[0])
+          .toBeLessThan(http.createServer.mock.invocationCallOrder[0]);
+      });
+
+      it('should warm up the engine over its sources, and log it', async() => {
+        (<any> instance).warmup = 5;
+        const engine: any = await instance.engine;
+        engine.warmup = jest.fn().mockResolvedValue({ executions: 5 });
+        const errors = new PassThrough();
+        await instance.warmUp(engine, errors);
+        errors.end();
+
+        expect(engine.warmup).toHaveBeenCalledWith(instance.context, { executions: 5, budget: instance.timeout });
+        await expect(stringifyStream(errors)).resolves
+          .toMatch(/^Worker \d+ warmed up with 5 query executions in \d+ ms\.\n$/u);
+      });
+
+      it('should log warm-up failures without failing', async() => {
+        const engine: any = await instance.engine;
+        engine.warmup = jest.fn().mockRejectedValue(new Error('no data'));
+        const errors = new PassThrough();
+        await instance.warmUp(engine, errors);
+        errors.end();
+
+        await expect(stringifyStream(errors)).resolves.toBe(`Worker ${process.pid} could not warm up: no data\n`);
+      });
+
       it('should call createServer with the correct arguments', async() => {
         await instance.run(stdout, stderr);
 
@@ -576,6 +663,23 @@ describe('HttpServiceSparqlEndpoint', () => {
 
         // Send shutdown message
         shutdownListener('shutdown');
+
+        expect((response1).end).toHaveBeenCalledWith('!TIMEDOUT!', expect.anything());
+        await new Promise(setImmediate);
+        expect(process.exit).toHaveBeenCalledTimes(1);
+      });
+
+      it('should end an open connection when a query times out', async() => {
+        // Start server
+        await instance.run(stdout, stderr);
+        const server = http.createServer.mock.results[0].value;
+
+        // Open new connection
+        const response1 = new EventEmitter();
+        (response1).end = jest.fn((message, resolve) => resolve());
+        server.emit('request', undefined, response1);
+
+        instance.timeOutQuery(0, stderr);
 
         expect((response1).end).toHaveBeenCalledWith('!TIMEDOUT!', expect.anything());
         await new Promise(setImmediate);
@@ -778,91 +882,19 @@ describe('HttpServiceSparqlEndpoint', () => {
         expect(cluster.disconnect).toHaveBeenCalledTimes(1);
       });
 
-      it('should handle worker start messages', async() => {
+      it('should not track the queries of workers', async() => {
         await instance.run(stdout, stderr);
 
         // Simulate listening event
         const dummyWorker: any = new EventEmitter();
-        dummyWorker.send = jest.fn();
-        dummyWorker.isConnected = jest.fn(() => true);
         dummyWorker.process = {
           pid: 123,
         };
         (<any> jest.mocked(cluster.on).mock.calls[0][1])(dummyWorker);
 
-        // Simulate start event
-        dummyWorker.emit('message', { type: 'start', queryId: 0 });
-
-        expect(setTimeout).toHaveBeenCalledTimes(1);
-        expect(setTimeout).toHaveBeenLastCalledWith(expect.any(Function), 60_000);
-        expect(dummyWorker.send).not.toHaveBeenCalled();
-
-        // Simulate timeout is passed
-        jest.runAllTimers();
-
-        expect(dummyWorker.send).toHaveBeenCalledWith('shutdown');
-      });
-
-      it('should handle worker end messages before timeout is reached', async() => {
-        await instance.run(stdout, stderr);
-
-        // Simulate listening event
-        const dummyWorker: any = new EventEmitter();
-        dummyWorker.send = jest.fn();
-        dummyWorker.isConnected = jest.fn(() => true);
-        dummyWorker.process = {
-          pid: 123,
-        };
-        (<any> jest.mocked(cluster.on).mock.calls[0][1])(dummyWorker);
-
-        // Simulate start event
-        dummyWorker.emit('message', { type: 'start', queryId: 0 });
-
-        expect(setTimeout).toHaveBeenCalledTimes(1);
-        expect(setTimeout).toHaveBeenLastCalledWith(expect.any(Function), 60_000);
-        expect(dummyWorker.send).not.toHaveBeenCalled();
-
-        // Simulate end event
-        dummyWorker.emit('message', { type: 'end', queryId: 0 });
-
-        expect(clearTimeout).toHaveBeenCalledTimes(1);
-
-        expect(dummyWorker.send).not.toHaveBeenCalled();
-
-        // Simulate timeout is passed
-        jest.runAllTimers();
-
-        expect(dummyWorker.send).not.toHaveBeenCalled();
-      });
-
-      it('should handle worker end messages after timeout is reached', async() => {
-        await instance.run(stdout, stderr);
-
-        // Simulate listening event
-        const dummyWorker: any = new EventEmitter();
-        dummyWorker.send = jest.fn();
-        dummyWorker.isConnected = jest.fn(() => true);
-        dummyWorker.process = {
-          pid: 123,
-        };
-        (<any> jest.mocked(cluster.on).mock.calls[0][1])(dummyWorker);
-
-        // Simulate start event
-        dummyWorker.emit('message', { type: 'start', queryId: 0 });
-
-        expect(setTimeout).toHaveBeenCalledTimes(1);
-        expect(setTimeout).toHaveBeenLastCalledWith(expect.any(Function), 60_000);
-        expect(dummyWorker.send).not.toHaveBeenCalled();
-
-        // Simulate timeout is passed
-        jest.runAllTimers();
-
-        expect(dummyWorker.send).toHaveBeenCalledWith('shutdown');
-
-        // Simulate end event
-        dummyWorker.emit('message', 'end');
-
-        expect(clearTimeout).not.toHaveBeenCalled();
+        // Workers time out their own queries
+        expect(dummyWorker.listenerCount('message')).toBe(0);
+        expect(setTimeout).not.toHaveBeenCalled();
       });
 
       it('should handle SIGINTs', async() => {
@@ -872,58 +904,6 @@ describe('HttpServiceSparqlEndpoint', () => {
         (<any> jest.mocked(process.once).mock.calls[0][1])();
 
         expect(cluster.disconnect).toHaveBeenCalledTimes(1);
-      });
-
-      it('should catch worker shutdown errors', async() => {
-        await instance.run(stdout, stderr);
-
-        // Simulate listening event
-        const dummyWorker: any = new EventEmitter();
-        dummyWorker.send = jest.fn(() => {
-          throw new Error('shutdown exception');
-        });
-        dummyWorker.isConnected = jest.fn(() => true);
-        dummyWorker.process = {
-          pid: 123,
-        };
-        (<any> jest.mocked(cluster.on).mock.calls[0][1])(dummyWorker);
-
-        // Simulate start event
-        dummyWorker.emit('message', { type: 'start', queryId: 0 });
-
-        expect(setTimeout).toHaveBeenCalledTimes(1);
-        expect(setTimeout).toHaveBeenLastCalledWith(expect.any(Function), 60_000);
-        expect(dummyWorker.send).not.toHaveBeenCalled();
-
-        // Simulate timeout is passed
-        jest.runAllTimers();
-
-        expect(dummyWorker.send).toHaveBeenCalledWith('shutdown');
-      });
-
-      it('should not send message to disconnected worker', async() => {
-        await instance.run(stdout, stderr);
-
-        // Simulate listening event
-        const dummyWorker: any = new EventEmitter();
-        dummyWorker.send = jest.fn();
-        dummyWorker.isConnected = jest.fn(() => false);
-        dummyWorker.process = {
-          pid: 123,
-        };
-        (<any> jest.mocked(cluster.on).mock.calls[0][1])(dummyWorker);
-
-        // Simulate start event
-        dummyWorker.emit('message', { type: 'start', queryId: 0 });
-
-        expect(setTimeout).toHaveBeenCalledTimes(1);
-        expect(setTimeout).toHaveBeenLastCalledWith(expect.any(Function), 60_000);
-        expect(dummyWorker.send).not.toHaveBeenCalled();
-
-        // Simulate timeout is passed
-        jest.runAllTimers();
-
-        expect(dummyWorker.send).not.toHaveBeenCalled();
       });
     });
 
@@ -945,6 +925,7 @@ describe('HttpServiceSparqlEndpoint', () => {
       function makeRequest() {
         request = Readable.from([ 'default_test_request_content' ]);
         request.url = 'url_sparql';
+        request.socket = {};
         request.headers = { 'content-type': 'contenttypewhichdefinitelydoesnotexist', accept: '*/*' };
         return request;
       }
@@ -1030,13 +1011,38 @@ describe('HttpServiceSparqlEndpoint', () => {
 
         expect(response.writeHead).toHaveBeenCalledWith(
           405,
-          { 'content-type': HttpServiceSparqlEndpoint.MIME_JSON, 'Access-Control-Allow-Origin': '*' },
+          {
+            'content-type': HttpServiceSparqlEndpoint.MIME_JSON,
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS, POST, QUERY',
+            Allow: 'GET, HEAD, OPTIONS, POST, QUERY',
+            'Accept-Query': 'application/sparql-query',
+          },
         );
+      });
+
+      it('should answer a CORS preflight request for OPTIONS', async() => {
+        request.method = 'OPTIONS';
+        await instance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+        expect(response.writeHead).toHaveBeenCalledWith(
+          204,
+          {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Accept, Authorization, Content-Type',
+            'Access-Control-Max-Age': '86400',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS, POST, QUERY',
+            Allow: 'GET, HEAD, OPTIONS, POST, QUERY',
+            'Accept-Query': 'application/sparql-query',
+          },
+        );
+        expect(instance.writeQueryResult).not.toHaveBeenCalled();
       });
 
       it('should call writeQueryResult with correct arguments if request method equals POST', async() => {
         (<any> instance).parseBody = jest.fn(() => Promise.resolve({ type: 'query', value: 'test_parseBody_result' }));
         request.method = 'POST';
+        request.headers['content-type'] = 'application/sparql-query';
         await instance.handleRequest(engine, variants, stdout, stderr, request, response);
 
         expect(instance.writeQueryResult).toHaveBeenCalledWith(
@@ -1051,6 +1057,65 @@ describe('HttpServiceSparqlEndpoint', () => {
           false,
           0,
         );
+      });
+
+      it('should call writeQueryResult with correct arguments if request method equals QUERY', async() => {
+        (<any> instance).parseBody = jest.fn(() => Promise.resolve({ type: 'query', value: 'test_parseBody_result' }));
+        request.method = 'QUERY';
+        await instance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+        expect(instance.writeQueryResult).toHaveBeenCalledWith(
+          engine,
+          stdout,
+          stderr,
+          request,
+          response,
+          { type: 'query', value: 'test_parseBody_result' },
+          null,
+          false,
+          true,
+          0,
+        );
+      });
+
+      it.each([ 'POST', 'QUERY' ])('should respond with 400 when the %s body can not be parsed', async(method) => {
+        (<any> instance).parseBody = jest.fn(() => Promise.reject(new Error('Invalid request body')));
+        request.method = method;
+        request.headers['content-type'] = 'application/sparql-query';
+        await instance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+        expect(instance.writeQueryResult).not.toHaveBeenCalled();
+        expect(response.writeHead).toHaveBeenCalledWith(
+          400,
+          { 'content-type': HttpServiceSparqlEndpoint.MIME_PLAIN, 'Access-Control-Allow-Origin': '*' },
+        );
+        expect(response.end).toHaveBeenCalledWith('Invalid request body\n');
+      });
+
+      it('should respond with 400 when an update is invoked with GET', async() => {
+        request.method = 'GET';
+        request.url = 'url_sparql_update_param';
+        await instance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+        expect(instance.writeQueryResult).not.toHaveBeenCalled();
+        expect(response.writeHead).toHaveBeenCalledWith(
+          400,
+          { 'content-type': HttpServiceSparqlEndpoint.MIME_PLAIN, 'Access-Control-Allow-Origin': '*' },
+        );
+        expect(response.end).toHaveBeenCalledWith('SPARQL updates can only be invoked with a POST request\n');
+      });
+
+      it('should respond with 400 when more than one query parameter is passed', async() => {
+        request.method = 'GET';
+        request.url = 'url_sparql_multiple_queries';
+        await instance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+        expect(instance.writeQueryResult).not.toHaveBeenCalled();
+        expect(response.writeHead).toHaveBeenCalledWith(
+          400,
+          { 'content-type': HttpServiceSparqlEndpoint.MIME_PLAIN, 'Access-Control-Allow-Origin': '*' },
+        );
+        expect(response.end).toHaveBeenCalledWith('A request can only contain a single query parameter\n');
       });
 
       it('should choose a mediaType if accept header is set', async() => {
@@ -1259,6 +1324,186 @@ describe('HttpServiceSparqlEndpoint', () => {
         expect(response.end)
           .toHaveBeenCalledWith(JSON.stringify({ message: 'Queries are accepted on /sparql. Redirected.' }));
       });
+
+      describe('with the graph store enabled', () => {
+        let graphStoreInstance: HttpServiceSparqlEndpoint;
+
+        beforeEach(() => {
+          graphStoreInstance = new HttpServiceSparqlEndpoint({ ...argsDefault, graphStore: true });
+          jest.spyOn(graphStoreInstance, 'writeQueryResult').mockImplementation();
+        });
+
+        it('should let the graph store handle a request that identifies a graph', async() => {
+          request.method = 'PUT';
+          request.url = 'url_store_graph';
+          request.headers['content-type'] = 'text/turtle';
+          jest.spyOn(graphStoreInstance.graphStore!, 'handleRequest')
+            .mockImplementation(async(...args: any[]) => ({ status: 204, message: await args[4]() }));
+
+          await graphStoreInstance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+          expect(graphStoreInstance.graphStore!.handleRequest).toHaveBeenCalledWith(
+            engine,
+            request,
+            { graph: DF.namedNode('http://example.org/g') },
+            'http://localhost:3000/store',
+            expect.any(Function),
+          );
+          expect(response.writeHead).toHaveBeenCalledWith(204, {
+            'content-type': HttpServiceSparqlEndpoint.MIME_PLAIN,
+            'Access-Control-Allow-Origin': '*',
+          });
+          expect(response.end).toHaveBeenCalledWith('default_test_request_content\n');
+          expect(graphStoreInstance.writeQueryResult).not.toHaveBeenCalled();
+        });
+
+        it('should respond with 405 to a DELETE on the graph store itself', async() => {
+          request.method = 'DELETE';
+          request.url = 'url_store';
+          await graphStoreInstance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+          expect(response.writeHead).toHaveBeenCalledWith(405, {
+            'content-type': HttpServiceSparqlEndpoint.MIME_PLAIN,
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'OPTIONS, POST',
+            Allow: 'OPTIONS, POST',
+          });
+        });
+
+        it('should answer a CORS preflight request for OPTIONS on the graph store itself', async() => {
+          request.method = 'OPTIONS';
+          request.url = 'url_store';
+          await graphStoreInstance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+          expect(response.writeHead).toHaveBeenCalledWith(
+            204,
+            {
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Headers': 'Accept, Authorization, Content-Type',
+              'Access-Control-Max-Age': '86400',
+              'Access-Control-Allow-Methods': 'OPTIONS, POST',
+              Allow: 'OPTIONS, POST',
+            },
+          );
+        });
+
+        it('should leave the SPARQL endpoint to the SPARQL protocol', async() => {
+          request.method = 'GET';
+          request.url = 'url_sparql';
+          await graphStoreInstance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+          expect(graphStoreInstance.writeQueryResult).toHaveBeenCalledWith(
+            engine,
+            stdout,
+            stderr,
+            request,
+            response,
+            { type: 'query', value: 'test_query' },
+            null,
+            false,
+            true,
+            0,
+          );
+        });
+
+        it('should answer a CORS preflight request for OPTIONS on a graph', async() => {
+          request.method = 'OPTIONS';
+          request.url = 'url_store_graph';
+          await graphStoreInstance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+          expect(response.writeHead).toHaveBeenCalledWith(
+            204,
+            {
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Headers': 'Accept, Authorization, Content-Type',
+              'Access-Control-Max-Age': '86400',
+              'Access-Control-Allow-Methods': 'DELETE, GET, HEAD, OPTIONS, POST, PUT',
+              Allow: 'DELETE, GET, HEAD, OPTIONS, POST, PUT',
+            },
+          );
+          expect(graphStoreInstance.writeQueryResult).not.toHaveBeenCalled();
+        });
+
+        it('should respond with 404 to an OPTIONS request outside of both services', async() => {
+          request.method = 'OPTIONS';
+          request.url = 'not_urlsparql';
+          await graphStoreInstance.handleRequest(engine, variants, stdout, stderr, request, response);
+
+          expect(response.writeHead).toHaveBeenCalledWith(
+            404,
+            { 'content-type': HttpServiceSparqlEndpoint.MIME_JSON, 'Access-Control-Allow-Origin': '*' },
+          );
+        });
+      });
+    });
+
+    describe('negotiateMediaType', () => {
+      const negotiate = require('negotiate');
+      let variants: { type: string; quality: number }[];
+      let request: any;
+
+      beforeEach(() => {
+        variants = [{ type: 'a/a', quality: 1 }, { type: 'b/b', quality: 0.9 }];
+        request = { method: 'POST', headers: { accept: 'b/b' }};
+        jest.spyOn(negotiate, 'choose');
+      });
+
+      afterEach(() => {
+        jest.restoreAllMocks();
+      });
+
+      it('should not negotiate without accept header', () => {
+        request.headers = {};
+        expect(instance.negotiateMediaType(variants, request)).toBeNull();
+        expect(negotiate.choose).not.toHaveBeenCalled();
+      });
+
+      it('should negotiate once for the same headers', () => {
+        expect(instance.negotiateMediaType(variants, request)).toBe('b/b');
+        expect(instance.negotiateMediaType(variants, request)).toBe('b/b');
+        expect(negotiate.choose).toHaveBeenCalledTimes(1);
+      });
+
+      it('should cache a null media type', () => {
+        request.headers.accept = '*/*';
+        expect(instance.negotiateMediaType(variants, request)).toBeNull();
+        expect(instance.negotiateMediaType(variants, request)).toBeNull();
+        expect(negotiate.choose).toHaveBeenCalledTimes(1);
+      });
+
+      it('should negotiate again for other accept headers', () => {
+        expect(instance.negotiateMediaType(variants, request)).toBe('b/b');
+        request.headers = { accept: 'a/a' };
+        expect(instance.negotiateMediaType(variants, request)).toBe('a/a');
+        expect(negotiate.choose).toHaveBeenCalledTimes(2);
+      });
+
+      it('should negotiate again for other charset, encoding, or language headers', () => {
+        instance.negotiateMediaType(variants, request);
+        request.headers['accept-charset'] = 'utf-8';
+        instance.negotiateMediaType(variants, request);
+        request.headers['accept-encoding'] = 'gzip';
+        instance.negotiateMediaType(variants, request);
+        request.headers['accept-language'] = 'en';
+        instance.negotiateMediaType(variants, request);
+        expect(negotiate.choose).toHaveBeenCalledTimes(4);
+      });
+
+      it('should negotiate again for other variants', () => {
+        expect(instance.negotiateMediaType(variants, request)).toBe('b/b');
+        expect(instance.negotiateMediaType([{ type: 'a/a', quality: 1 }], request)).toBeNull();
+        expect(negotiate.choose).toHaveBeenCalledTimes(2);
+      });
+
+      it('should clear the cache when it is full', () => {
+        const size = HttpServiceSparqlEndpoint.NEGOTIATION_CACHE_SIZE;
+        (<any> HttpServiceSparqlEndpoint).NEGOTIATION_CACHE_SIZE = 1;
+        instance.negotiateMediaType(variants, request);
+        instance.negotiateMediaType(variants, { ...request, headers: { accept: 'a/a' }});
+        instance.negotiateMediaType(variants, request);
+        expect(negotiate.choose).toHaveBeenCalledTimes(3);
+        (<any> HttpServiceSparqlEndpoint).NEGOTIATION_CACHE_SIZE = size;
+      });
     });
 
     describe('writeQueryResult', () => {
@@ -1271,12 +1516,14 @@ describe('HttpServiceSparqlEndpoint', () => {
 
       const s = '/sparql';
       const sd = 'http://www.w3.org/ns/sparql-service-description#';
+      const sparql = 'http://www.w3.org/ns/sparql#';
 
       beforeEach(() => {
         response = new ServerResponseMock();
         request = Readable.from([ 'default_request_content' ]);
         request.url = '/sparql';
         request.headers = { host: 'localhost:3000' };
+        request.socket = {};
         query = {
           type: 'query',
           value: 'default_test_query',
@@ -1289,6 +1536,11 @@ describe('HttpServiceSparqlEndpoint', () => {
           quad(s, `${sd}endpoint`, s),
           quad(s, `${sd}url`, s),
           quad(s, `${sd}feature`, `${sd}BasicFederatedQuery`),
+          quad(s, `${sd}supportedLanguage`, `${sd}SPARQLQuery`),
+          quad(s, `${sd}supportedVersion`, `${sparql}version-1.0`),
+          quad(s, `${sd}supportedVersion`, `${sparql}version-1.1`),
+          quad(s, `${sd}supportedVersion`, `${sparql}version-1.2`),
+          quad(s, `${sd}supportedVersion`, `${sparql}version-1.2-basic`),
           quad(s, `${sd}supportedLanguage`, `${sd}SPARQL10Query`),
           quad(s, `${sd}supportedLanguage`, `${sd}SPARQL11Query`),
           quad(s, `${sd}resultFormat`, 'ONE'),
@@ -1313,7 +1565,7 @@ describe('HttpServiceSparqlEndpoint', () => {
           0,
         );
 
-        await expect(endCalledPromise).resolves.toBe('Rejected query');
+        await expect(endCalledPromise).resolves.toBe('Rejected query\n');
         expect(response.writeHead).toHaveBeenLastCalledWith(
           400,
           { 'content-type': HttpServiceSparqlEndpoint.MIME_PLAIN, 'Access-Control-Allow-Origin': '*' },
@@ -1338,6 +1590,8 @@ describe('HttpServiceSparqlEndpoint', () => {
         await expect(endCalledPromise).resolves.toBe(
           'The response for the given query could not be serialized for the requested media type\n',
         );
+        // Writing the header again would throw for an actual response
+        expect(response.writeHead).toHaveBeenCalledTimes(1);
         expect(response.writeHead).toHaveBeenLastCalledWith(
           400,
           { 'content-type': HttpServiceSparqlEndpoint.MIME_PLAIN, 'Access-Control-Allow-Origin': '*' },
@@ -1385,6 +1639,33 @@ describe('HttpServiceSparqlEndpoint', () => {
         );
 
         await expect(endCalledPromise).resolves.toBe('An internal server error occurred.\n');
+        expect(response.end).toHaveBeenCalledTimes(1);
+        expect(response.writeHead).toHaveBeenCalledTimes(1);
+        expect(response.writeHead).toHaveBeenLastCalledWith(
+          200,
+          { 'content-type': mediaType, 'Access-Control-Allow-Origin': '*' },
+        );
+      });
+
+      it(`should not re-end the response when already ended and the queryresult stream emits an error`, async() => {
+        mediaType = 'mediatype_queryresultstreamerror';
+        response.end('ENDED EARLY');
+        Object.defineProperty(response, 'writableEnded', { value: true });
+        await instance.writeQueryResult(
+          await new QueryEngineFactoryBase().create(),
+          new PassThrough(),
+          new PassThrough(),
+          request,
+          response,
+          query,
+          mediaType,
+          false,
+          true,
+          0,
+        );
+
+        await expect(endCalledPromise).resolves.toBe('ENDED EARLY');
+        expect(response.end).toHaveBeenCalledTimes(1);
         expect(response.writeHead).toHaveBeenCalledTimes(1);
         expect(response.writeHead).toHaveBeenLastCalledWith(
           200,
@@ -1456,7 +1737,14 @@ describe('HttpServiceSparqlEndpoint', () => {
         expect(response.writeHead).toHaveBeenCalledTimes(1);
         expect(response.writeHead).toHaveBeenLastCalledWith(
           200,
-          { 'content-type': mediaType, 'Access-Control-Allow-Origin': '*' },
+          {
+            'content-type': mediaType,
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Expose-Headers': 'Accept-Query, Allow',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS, POST, QUERY',
+            Allow: 'GET, HEAD, OPTIONS, POST, QUERY',
+            'Accept-Query': 'application/sparql-query',
+          },
         );
         response.push(null);
         const responseString = await stringifyStream(response);
@@ -1475,6 +1763,7 @@ describe('HttpServiceSparqlEndpoint', () => {
         serviceDescriptionQuads.push(quad(s, `${sd}extensionFunction`, 'https://example.org/functions#args1'));
         await expect((spyResultToString.mock.calls[0][0]).execute()).resolves.toEqual(new ArrayIterator(
           serviceDescriptionQuads,
+          { autoStart: false },
         ));
       });
 
@@ -1504,7 +1793,14 @@ describe('HttpServiceSparqlEndpoint', () => {
         expect(response.writeHead).toHaveBeenCalledTimes(1);
         expect(response.writeHead).toHaveBeenLastCalledWith(
           200,
-          { 'content-type': mediaType, 'Access-Control-Allow-Origin': '*' },
+          {
+            'content-type': mediaType,
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Expose-Headers': 'Accept-Query, Allow',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS, POST, QUERY',
+            Allow: 'GET, HEAD, OPTIONS, POST, QUERY',
+            'Accept-Query': 'application/sparql-query',
+          },
         );
         response.push(null);
         const responseString = await stringifyStream(response);
@@ -1543,7 +1839,14 @@ describe('HttpServiceSparqlEndpoint', () => {
         expect(response.writeHead).toHaveBeenCalledTimes(1);
         expect(response.writeHead).toHaveBeenLastCalledWith(
           200,
-          { 'content-type': mediaType, 'Access-Control-Allow-Origin': '*' },
+          {
+            'content-type': mediaType,
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Expose-Headers': 'Accept-Query, Allow',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS, POST, QUERY',
+            Allow: 'GET, HEAD, OPTIONS, POST, QUERY',
+            'Accept-Query': 'application/sparql-query',
+          },
         );
       });
 
@@ -1577,6 +1880,82 @@ describe('HttpServiceSparqlEndpoint', () => {
         );
         expect(response.writeHead)
           .toHaveBeenLastCalledWith(400, { 'content-type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+      });
+
+      describe('service description cache', () => {
+        async function writeServiceDescription(
+          localInstance: HttpServiceSparqlEndpoint,
+          engine: any,
+          url = '/sparql',
+          localMediaType = mediaType,
+        ): Promise<any> {
+          const localResponse: any = new ServerResponseMock();
+          const ended = new Promise(resolve => localResponse.onEnd = resolve);
+          const localRequest: any = Readable.from([ 'default_request_content' ]);
+          localRequest.url = url;
+          localRequest.headers = { host: 'localhost:3000' };
+          localRequest.socket = {};
+          await localInstance.writeQueryResult(
+            engine,
+            new PassThrough(),
+            new PassThrough(),
+            localRequest,
+            localResponse,
+            { type: 'query', value: '', context: undefined },
+            localMediaType,
+            false,
+            true,
+            0,
+          );
+          return ended;
+        }
+
+        it('should reuse the serialized service description', async() => {
+          const engine = await new QueryEngineFactoryBase().create();
+          const spyResultToString = jest.spyOn(engine, 'resultToString');
+          await expect(writeServiceDescription(instance, engine)).resolves.toBeUndefined();
+          await expect(writeServiceDescription(instance, engine)).resolves.toEqual(Buffer.from('test_query_result'));
+          expect(spyResultToString).toHaveBeenCalledTimes(1);
+        });
+
+        it('should serialize again for other media types', async() => {
+          const engine = await new QueryEngineFactoryBase().create();
+          const spyResultToString = jest.spyOn(engine, 'resultToString');
+          await writeServiceDescription(instance, engine);
+          await writeServiceDescription(instance, engine, '/sparql', 'other_mediatype');
+          expect(spyResultToString).toHaveBeenCalledTimes(2);
+        });
+
+        it('should not cache service descriptions of URLs with a query string', async() => {
+          const engine = await new QueryEngineFactoryBase().create();
+          const spyResultToString = jest.spyOn(engine, 'resultToString');
+          await writeServiceDescription(instance, engine, '/sparql?other');
+          await expect(writeServiceDescription(instance, engine, '/sparql?other')).resolves.toBeUndefined();
+          expect(spyResultToString).toHaveBeenCalledTimes(2);
+        });
+
+        it('should not cache failed serializations', async() => {
+          const engine = await new QueryEngineFactoryBase().create();
+          const spyResultToString = jest.spyOn(engine, 'resultToString');
+          const error = 'An internal server error occurred.\n';
+          await expect(writeServiceDescription(instance, engine, '/sparql', 'mediatype_queryresultstreamerror'))
+            .resolves.toBe(error);
+          await expect(writeServiceDescription(instance, engine, '/sparql', 'mediatype_queryresultstreamerror'))
+            .resolves.toBe(error);
+          expect(spyResultToString).toHaveBeenCalledTimes(2);
+        });
+
+        it('should not cache service descriptions if computing the VoID statistics fails', async() => {
+          const localInstance = new HttpServiceSparqlEndpoint({ ...argsDefault, emitVoid: true });
+          const engine = await new QueryEngineFactoryBase().create();
+          engine.queryBindings = () => {
+            throw new Error('statistics error');
+          };
+          const spyResultToString = jest.spyOn(engine, 'resultToString');
+          await writeServiceDescription(localInstance, engine);
+          await writeServiceDescription(localInstance, engine);
+          expect(spyResultToString).toHaveBeenCalledTimes(2);
+        });
       });
 
       describe('VoID description', () => {
@@ -1627,8 +2006,40 @@ describe('HttpServiceSparqlEndpoint', () => {
                 ]),
               ];
             }
-            return <BindingsStream>(new ArrayIterator<RDF.Bindings>(bindingsArray));
+            return <BindingsStream>(new ArrayIterator<RDF.Bindings>(bindingsArray, { autoStart: false }));
           };
+        });
+
+        it('should serialize the service description again after an update', async() => {
+          const localInstance = new HttpServiceSparqlEndpoint({ ...argsDefault, emitVoid: true });
+          const engine = await new QueryEngineFactoryBase().create();
+          engine.queryBindings = queryBindings;
+          const spyResultToString = jest.spyOn(engine, 'resultToString');
+          const write = async(value: string): Promise<void> => {
+            const localResponse: any = new ServerResponseMock();
+            const ended = new Promise(resolve => localResponse.onEnd = resolve);
+            await localInstance.writeQueryResult(
+              engine,
+              new PassThrough(),
+              new PassThrough(),
+              request,
+              localResponse,
+              { type: 'query', value, context: undefined },
+              mediaType,
+              false,
+              true,
+              0,
+            );
+            await ended;
+          };
+
+          await write('');
+          await write('');
+          expect(spyResultToString).toHaveBeenCalledTimes(1);
+          await write('INSERT DATA { <http://example.org/s> <http://example.org/p> "o" . }');
+          expect(spyResultToString).toHaveBeenCalledTimes(2);
+          await write('');
+          expect(spyResultToString).toHaveBeenCalledTimes(3);
         });
 
         it('should append the VoID description in the service description when emitVoid is not true', async() => {
@@ -1672,7 +2083,14 @@ describe('HttpServiceSparqlEndpoint', () => {
           expect(response.writeHead).toHaveBeenCalledTimes(1);
           expect(response.writeHead).toHaveBeenLastCalledWith(
             200,
-            { 'content-type': mediaType, 'Access-Control-Allow-Origin': '*' },
+            {
+              'content-type': mediaType,
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Expose-Headers': 'Accept-Query, Allow',
+              'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS, POST, QUERY',
+              Allow: 'GET, HEAD, OPTIONS, POST, QUERY',
+              'Accept-Query': 'application/sparql-query',
+            },
           );
           response.push(null);
           const responseString = await stringifyStream(response);
@@ -1759,7 +2177,7 @@ INSERT DATA {
             {
               type: 'query',
               value: query,
-              context: { [KeysQueryOperation.operation.name]: translate(query, { quads: true }) },
+              context: { [KeysQueryOperation.operation.name]: { type: Algebra.Types.DELETE_INSERT }},
             },
             mediaType,
             false,
@@ -1856,10 +2274,107 @@ INSERT DATA {
         expect(responseString).toBe('test_query_result');
       });
 
-      it('should emit process start and end events', async() => {
-        jest.spyOn(process, 'send').mockImplementation();
+      it('should only log a query timeout outside of a worker', async() => {
+        const stderr = new PassThrough();
+        instance.timeOutQuery(3, stderr);
+        stderr.end();
+        await expect(stringifyStream(stderr)).resolves.toBe(`Worker ${process.pid} timed out for query 3.\n`);
+        expect(process.exit).not.toHaveBeenCalled();
+      });
+
+      it('should time out the query in the worker', async() => {
+        jest.spyOn(instance, 'timeOutQuery').mockImplementation();
+        const stderr = new PassThrough();
         const engine = await new QueryEngineFactoryBase().create();
         engine.query = () => ({ resultType: 'bindings' });
+
+        await instance.writeQueryResult(
+          engine,
+          new PassThrough(),
+          stderr,
+          request,
+          response,
+          query,
+          '',
+          false,
+          true,
+          0,
+        );
+
+        expect(setTimeout).toHaveBeenCalledWith(expect.any(Function), 60_000);
+        expect(instance.timeOutQuery).not.toHaveBeenCalled();
+        jest.runAllTimers();
+        expect(instance.timeOutQuery).toHaveBeenCalledWith(0, stderr);
+
+        // A query that timed out is not reported as completed
+        response.emit('close');
+        stderr.end();
+        await expect(stringifyStream(stderr)).resolves.toBe(
+          `Worker ${process.pid} got assigned a new query (0).\n`,
+        );
+      });
+
+      it('should clear the timeout when the response closes', async() => {
+        jest.spyOn(instance, 'timeOutQuery').mockImplementation();
+        const stderr = new PassThrough();
+        const engine = await new QueryEngineFactoryBase().create();
+        engine.query = () => ({ resultType: 'bindings' });
+
+        await instance.writeQueryResult(
+          engine,
+          new PassThrough(),
+          stderr,
+          request,
+          response,
+          query,
+          '',
+          false,
+          true,
+          0,
+        );
+
+        response.emit('close');
+        expect(clearTimeout).toHaveBeenCalledTimes(1);
+        jest.runAllTimers();
+        expect(instance.timeOutQuery).not.toHaveBeenCalled();
+        stderr.end();
+        await expect(stringifyStream(stderr)).resolves.toBe(
+          `Worker ${process.pid} got assigned a new query (0).\nWorker ${process.pid} has completed query 0.\n`,
+        );
+      });
+
+      it('should clear the timeout when the client disconnects during the query', async() => {
+        jest.spyOn(instance, 'timeOutQuery').mockImplementation();
+        const engine = await new QueryEngineFactoryBase().create();
+        // A query that never settles, so that the response closes while the execution is still running
+        engine.query = () => new Promise(() => {
+          // Do nothing
+        });
+
+        const written = instance.writeQueryResult(
+          engine,
+          new PassThrough(),
+          new PassThrough(),
+          request,
+          response,
+          query,
+          '',
+          false,
+          true,
+          0,
+        );
+        await new Promise(setImmediate);
+
+        response.emit('close');
+        jest.runAllTimers();
+        expect(instance.timeOutQuery).not.toHaveBeenCalled();
+        expect(written).toBeInstanceOf(Promise);
+      });
+
+      it('should clear the timeout for a query that fails', async() => {
+        jest.spyOn(instance, 'timeOutQuery').mockImplementation();
+        const engine = await new QueryEngineFactoryBase().create();
+        engine.query = () => Promise.reject(new Error('Query failure'));
 
         await instance.writeQueryResult(
           engine,
@@ -1874,12 +2389,50 @@ INSERT DATA {
           0,
         );
 
-        expect(process.send).toHaveBeenCalledTimes(1);
-        expect(process.send).toHaveBeenCalledWith({ type: 'start', queryId: 0 });
-
         response.emit('close');
-        expect(process.send).toHaveBeenCalledTimes(2);
-        expect(process.send).toHaveBeenCalledWith({ type: 'end', queryId: 0 });
+        jest.runAllTimers();
+        expect(instance.timeOutQuery).not.toHaveBeenCalled();
+      });
+
+      it('should not execute an update again while serializing the result', async() => {
+        const engine = await new QueryEngineFactoryBase().create();
+        // The update quads mediator consumes the quad streams of the update,
+        // so its execution only ever settles the first time it is invoked.
+        let started = false;
+        const execute = jest.fn(() => {
+          if (started) {
+            return new Promise<void>(() => {
+              // Never settles, as the quad streams have already been consumed
+            });
+          }
+          started = true;
+          return Promise.resolve();
+        });
+        engine.query = () => ({ resultType: 'void', execute });
+        // Like the simple serializer, which awaits the update before writing its response
+        engine.resultToString = (result: any) => ({
+          data: Readable.from((async function* () {
+            await result.execute();
+            yield 'ok';
+          })()),
+        });
+
+        await instance.writeQueryResult(
+          engine,
+          new PassThrough(),
+          new PassThrough(),
+          request,
+          response,
+          query,
+          '',
+          false,
+          true,
+          0,
+        );
+
+        // Without memoizing the execution, the response would never be ended
+        await expect(endCalledPromise).resolves.toBeFalsy();
+        expect(execute).toHaveBeenCalledTimes(1);
       });
 
       it('should fallback to simple for updates if media type is falsy', async() => {
@@ -1928,7 +2481,10 @@ INSERT DATA {
         );
 
         await expect(endCalledPromise).resolves.toBeFalsy();
-        expect(engine.query).toHaveBeenCalledWith('default_test_query', { [KeysQueryOperation.readOnly.name]: true });
+        expect(engine.query).toHaveBeenCalledWith('default_test_query', {
+          '@comunica/actor-init-query:baseIRI': 'http://localhost:3000/sparql',
+          [KeysQueryOperation.readOnly.name]: true,
+        });
       });
 
       it('should set not readOnly in the context if called with readOnly false', async() => {
@@ -1949,7 +2505,7 @@ INSERT DATA {
         );
 
         await expect(endCalledPromise).resolves.toBeFalsy();
-        expect(engine.query).toHaveBeenCalledWith('default_test_query', {});
+        expect(engine.query).toHaveBeenCalledWith('default_test_query', { '@comunica/actor-init-query:baseIRI': 'http://localhost:3000/sparql' });
       });
 
       it('should not override context entries by default', async() => {
@@ -1972,7 +2528,7 @@ INSERT DATA {
         );
 
         await expect(endCalledPromise).resolves.toBeFalsy();
-        expect(engine.query).toHaveBeenCalledWith('default_test_query', {});
+        expect(engine.query).toHaveBeenCalledWith('default_test_query', { '@comunica/actor-init-query:baseIRI': 'http://localhost:3000/sparql' });
       });
 
       it('should override context entries if contextOverride is enabled', async() => {
@@ -1996,7 +2552,318 @@ INSERT DATA {
         );
 
         await expect(endCalledPromise).resolves.toBeFalsy();
-        expect(engine.query).toHaveBeenCalledWith('default_test_query', { overrideKey: 'overrideValue' });
+        expect(engine.query).toHaveBeenCalledWith('default_test_query', {
+          '@comunica/actor-init-query:baseIRI': 'http://localhost:3000/sparql',
+          overrideKey: 'overrideValue',
+        });
+      });
+
+      describe('with a protocol-specified dataset', () => {
+        let engine: any;
+
+        beforeEach(async() => {
+          engine = await new QueryEngineFactoryBase().create();
+          jest.spyOn(engine, 'query').mockImplementation(() => ({ resultType: 'bindings' }));
+        });
+
+        async function writeResult(): Promise<void> {
+          await instance.writeQueryResult(
+            engine,
+            new PassThrough(),
+            new PassThrough(),
+            request,
+            response,
+            query,
+            '',
+            false,
+            false,
+            0,
+          );
+          await expect(endCalledPromise).resolves.toBeFalsy();
+        }
+
+        it('should not modify the query when the request has no URL', async() => {
+          request.url = undefined;
+
+          await writeResult();
+
+          expect(engine.query).toHaveBeenCalledWith('default_test_query', expect.anything());
+        });
+
+        it('should wrap a query in the protocol-specified dataset', async() => {
+          request.url = 'url_sparql_dataset';
+          engine.explain = jest.fn(() => Promise.resolve({ data: ask }));
+
+          await writeResult();
+
+          expect(engine.query).toHaveBeenCalledWith(from, expect.anything());
+        });
+
+        it('should replace the dataset that the query itself defines', async() => {
+          request.url = 'url_sparql_dataset';
+          engine.explain = jest.fn(() => Promise.resolve({
+            data: { type: Algebra.Types.FROM, input: ask, default: [ DF.namedNode('http://example.org/other') ], named: []},
+          }));
+
+          await writeResult();
+
+          expect(engine.query).toHaveBeenCalledWith(from, expect.anything());
+        });
+
+        it('should apply the protocol-specified dataset to the where clause of an update', async() => {
+          request.url = 'url_sparql_using';
+          query = { type: 'void', value: 'default_test_query', context: undefined };
+          engine.explain = jest.fn(() => Promise.resolve({
+            data: { type: Algebra.Types.DELETE_INSERT, insert: [], where: bgp },
+          }));
+
+          await writeResult();
+
+          expect(engine.query).toHaveBeenCalledWith({
+            type: Algebra.Types.DELETE_INSERT,
+            insert: [],
+            where: { type: Algebra.Types.FROM, input: bgp, default: [ DF.namedNode('http://example.org/g1') ], named: []},
+          }, expect.anything());
+        });
+      });
+    });
+
+    describe('a configured base IRI', () => {
+      it('should take precedence over the base IRI of the endpoint', async() => {
+        const engine = await new QueryEngineFactoryBase().create();
+        jest.spyOn(engine, 'query').mockImplementation(() => ({ resultType: 'bindings' }));
+        const response: any = new ServerResponseMock();
+        const request: any = Readable.from([ 'default_request_content' ]);
+        request.url = '/sparql';
+        request.headers = { host: 'localhost:3000' };
+        request.socket = {};
+        instance = new HttpServiceSparqlEndpoint({
+          ...argsDefault,
+          context: { '@comunica/actor-init-query:baseIRI': 'https://example.org/sparql' },
+        });
+
+        await instance.writeQueryResult(
+          engine,
+          new PassThrough(),
+          new PassThrough(),
+          request,
+          response,
+          { type: 'query', value: 'default_test_query', context: undefined },
+          '',
+          false,
+          false,
+          0,
+        );
+
+        expect(engine.query).toHaveBeenCalledWith('default_test_query', {
+          '@comunica/actor-init-query:baseIRI': 'https://example.org/sparql',
+        });
+      });
+    });
+
+    describe('getProtocolDataset', () => {
+      it('should be empty when no dataset is specified', () => {
+        expect(HttpServiceSparqlEndpoint.getProtocolDataset(<any> { query: {}}, 'query'))
+          .toEqual({ default: [], named: []});
+      });
+
+      it('should handle single and repeated query dataset parameters', () => {
+        expect(HttpServiceSparqlEndpoint.getProtocolDataset(<any> { query: {
+          'default-graph-uri': 'http://example.org/g1',
+          'named-graph-uri': [ 'http://example.org/n1', 'http://example.org/n2' ],
+        }}, 'query')).toEqual({
+          default: [ DF.namedNode('http://example.org/g1') ],
+          named: [ DF.namedNode('http://example.org/n1'), DF.namedNode('http://example.org/n2') ],
+        });
+      });
+
+      it('should handle the update dataset parameters', () => {
+        expect(HttpServiceSparqlEndpoint.getProtocolDataset(<any> { query: {
+          'using-graph-uri': 'http://example.org/g1',
+          'using-named-graph-uri': 'http://example.org/n1',
+          'default-graph-uri': 'http://example.org/ignored',
+        }}, 'void')).toEqual({
+          default: [ DF.namedNode('http://example.org/g1') ],
+          named: [ DF.namedNode('http://example.org/n1') ],
+        });
+      });
+    });
+
+    describe('applyUpdateDataset', () => {
+      const algebraFactory = new AlgebraFactory(DF);
+      const dataset = { default: [ DF.namedNode('http://example.org/g1') ], named: []};
+
+      it('should apply the dataset to all updates of a composite update', () => {
+        expect(HttpServiceSparqlEndpoint.applyUpdateDataset(algebraFactory, <any> {
+          type: Algebra.Types.COMPOSITE_UPDATE,
+          updates: [{ type: Algebra.Types.DELETE_INSERT, insert: [], where: bgp }],
+        }, dataset)).toEqual({
+          type: Algebra.Types.COMPOSITE_UPDATE,
+          updates: [{
+            type: Algebra.Types.DELETE_INSERT,
+            insert: [],
+            where: { type: Algebra.Types.FROM, input: bgp, ...dataset },
+          }],
+        });
+      });
+
+      it('should not modify updates without a where clause', () => {
+        const clear = { type: Algebra.Types.CLEAR, source: 'ALL', silent: false };
+        expect(HttpServiceSparqlEndpoint.applyUpdateDataset(algebraFactory, clear, dataset)).toBe(clear);
+      });
+
+      it('should not modify delete/insert operations without a where clause', () => {
+        const deleteInsert = { type: Algebra.Types.DELETE_INSERT, insert: []};
+        expect(HttpServiceSparqlEndpoint.applyUpdateDataset(algebraFactory, deleteInsert, dataset))
+          .toBe(deleteInsert);
+      });
+
+      it('should error on updates that define their own dataset', () => {
+        expect(() => HttpServiceSparqlEndpoint.applyUpdateDataset(algebraFactory, <any> {
+          type: Algebra.Types.DELETE_INSERT,
+          insert: [],
+          where: { type: Algebra.Types.FROM, input: bgp, default: [], named: []},
+        }, dataset)).toThrow(`A request with a using-graph-uri or using-named-graph-uri parameter can not contain a USING, USING NAMED or WITH clause`);
+      });
+    });
+
+    describe('getBaseIRI', () => {
+      it('should use the host and the path of the request', () => {
+        expect(HttpServiceSparqlEndpoint
+          .getBaseIRI(<any> { headers: { host: 'example.org' }, socket: {}}, 3_000))
+          .toBe('http://example.org/sparql');
+      });
+
+      it('should fall back to the port of the service when the request has no host', () => {
+        expect(HttpServiceSparqlEndpoint.getBaseIRI(<any> { headers: {}, socket: {}}, 1_234))
+          .toBe('http://localhost:1234/sparql');
+      });
+
+      it('should use the given path', () => {
+        expect(HttpServiceSparqlEndpoint
+          .getBaseIRI(<any> { headers: { host: 'example.org' }, socket: {}}, 3_000, '/store'))
+          .toBe('http://example.org/store');
+      });
+
+      it('should use https when the request was received over an encrypted socket', () => {
+        expect(HttpServiceSparqlEndpoint
+          .getBaseIRI(<any> { headers: { host: 'example.org' }, socket: { encrypted: true }}, 3_000))
+          .toBe('https://example.org/sparql');
+      });
+    });
+
+    describe('writeGraphStoreResult', () => {
+      let engine: any;
+      let response: any;
+      let stdout: PassThrough;
+      let request: any;
+      let endCalledPromise: Promise<string>;
+      let result: any;
+
+      beforeEach(async() => {
+        engine = await new QueryEngineFactoryBase().create();
+        response = new ServerResponseMock();
+        stdout = new PassThrough();
+        request = { method: 'GET', url: 'url_sparql_graph', headers: {}, socket: {}};
+        endCalledPromise = new Promise(resolve => response.onEnd = resolve);
+        result = { resultType: 'quads' };
+      });
+
+      it('should write a response without a graph', async() => {
+        await instance.writeGraphStoreResult(
+          engine,
+          stdout,
+          request,
+          response,
+          { status: 404, message: 'The graph does not exist.' },
+          'text/turtle',
+        );
+
+        expect(response.writeHead).toHaveBeenCalledWith(404, {
+          'content-type': HttpServiceSparqlEndpoint.MIME_PLAIN,
+          'Access-Control-Allow-Origin': '*',
+        });
+        await expect(endCalledPromise).resolves.toBe('The graph does not exist.\n');
+      });
+
+      it('should write a response without a graph and without a message', async() => {
+        await instance.writeGraphStoreResult(
+          engine,
+          stdout,
+          request,
+          response,
+          { status: 201, headers: { Location: 'http://example.org/sparql/g' }},
+          'text/turtle',
+        );
+
+        expect(response.writeHead).toHaveBeenCalledWith(201, {
+          'content-type': HttpServiceSparqlEndpoint.MIME_PLAIN,
+          'Access-Control-Allow-Origin': '*',
+          Location: 'http://example.org/sparql/g',
+        });
+        await expect(endCalledPromise).resolves.toBeUndefined();
+      });
+
+      it('should serialize a graph in the requested media type', async() => {
+        await instance
+          .writeGraphStoreResult(engine, stdout, request, response, { status: 200, result }, 'mtype_1');
+
+        expect(response.writeHead).toHaveBeenCalledWith(200, {
+          'content-type': 'mtype_1',
+          'Access-Control-Allow-Origin': '*',
+        });
+        await expect(endCalledPromise).resolves.toBeFalsy();
+        response.push(null);
+        await expect(stringifyStream(response)).resolves.toBe('test_query_result');
+      });
+
+      it('should serialize a graph as Turtle by default', async() => {
+        await instance
+          .writeGraphStoreResult(engine, stdout, request, response, { status: 200, result }, <any> null);
+
+        expect(response.writeHead).toHaveBeenCalledWith(200, {
+          'content-type': 'text/turtle',
+          'Access-Control-Allow-Origin': '*',
+        });
+      });
+
+      it('should not write a body for a HEAD request', async() => {
+        request.method = 'HEAD';
+        await instance
+          .writeGraphStoreResult(engine, stdout, request, response, { status: 200, result }, 'mtype_1');
+
+        expect(response.writeHead).toHaveBeenCalledWith(200, {
+          'content-type': 'mtype_1',
+          'Access-Control-Allow-Origin': '*',
+        });
+        await expect(endCalledPromise).resolves.toBeUndefined();
+      });
+
+      it('should end the response when the graph could not be serialized', async() => {
+        await instance.writeGraphStoreResult(
+          engine,
+          stdout,
+          request,
+          response,
+          { status: 200, result },
+          'mediatype_throwerror',
+        );
+
+        await expect(endCalledPromise).resolves
+          .toBe('The graph could not be serialized for the requested media type.\n');
+      });
+
+      it('should end the response when the serialization errors', async() => {
+        await instance.writeGraphStoreResult(
+          engine,
+          stdout,
+          request,
+          response,
+          { status: 200, result },
+          'mediatype_queryresultstreamerror',
+        );
+
+        await expect(endCalledPromise).resolves.toBe('An internal server error occurred.\n');
       });
     });
 
@@ -2055,6 +2922,169 @@ INSERT DATA {
       });
     });
 
+    describe('writeHtmlView', () => {
+      let response: any;
+      let request: any;
+      let endCalledPromise: any;
+
+      beforeEach(() => {
+        response = new ServerResponseMock();
+        request = Readable.from([ 'default_request_content' ]);
+        request.url = '/sparql';
+        request.method = 'GET';
+        request.headers = { host: 'localhost:3000' };
+        endCalledPromise = new Promise(resolve => response.onEnd = resolve);
+      });
+
+      it('should write HTML content with correct headers', async() => {
+        await instance.writeHtmlView(
+          new PassThrough(),
+          request,
+          response,
+        );
+
+        await expect(endCalledPromise).resolves.toBeTruthy();
+        expect(response.writeHead).toHaveBeenCalledWith(
+          200,
+          {
+            'content-type': HttpServiceSparqlEndpoint.MIME_HTML,
+            'Access-Control-Allow-Origin': '*',
+          },
+        );
+      });
+
+      it('should replace endpoint path placeholder with request URL', async() => {
+        request.url = '/custom-endpoint';
+        await instance.writeHtmlView(
+          new PassThrough(),
+          request,
+          response,
+        );
+
+        const html = await endCalledPromise;
+        expect(html).toContain('window.location.origin + "/custom-endpoint"');
+        expect(html).not.toContain('%%ENDPOINT_PATH%%');
+      });
+
+      it('should replace default query placeholder', async() => {
+        await instance.writeHtmlView(
+          new PassThrough(),
+          request,
+          response,
+        );
+
+        const html = await endCalledPromise;
+        expect(html).toContain('SELECT * WHERE');
+        expect(html).toContain('LIMIT 100');
+        expect(html).not.toContain('%%DEFAULT_QUERY%%');
+      });
+
+      it('should use /sparql as default endpoint when request.url is undefined', async() => {
+        request.url = undefined;
+        await instance.writeHtmlView(
+          new PassThrough(),
+          request,
+          response,
+        );
+
+        const html = await endCalledPromise;
+        expect(html).toContain('window.location.origin + "/sparql"');
+      });
+
+      it('should include Comunica branding in HTML', async() => {
+        await instance.writeHtmlView(
+          new PassThrough(),
+          request,
+          response,
+        );
+
+        const html = await endCalledPromise;
+        expect(html).toContain('Comunica SPARQL Endpoint');
+      });
+    });
+
+    describe('writeQueryResult with HTML Accept header', () => {
+      let response: any;
+      let request: any;
+
+      beforeEach(() => {
+        response = new ServerResponseMock();
+        request = Readable.from([ 'default_request_content' ]);
+        request.url = '/sparql';
+        request.method = 'GET';
+        request.socket = {};
+        request.headers = {
+          host: 'localhost:3000',
+          accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        };
+      });
+
+      it('should call writeHtmlView when Accept header contains text/html and no query', async() => {
+        const spyWriteHtmlView = jest.spyOn(instance, 'writeHtmlView');
+
+        await instance.writeQueryResult(
+          await new QueryEngineFactoryBase().create(),
+          new PassThrough(),
+          new PassThrough(),
+          request,
+          response,
+          { type: 'query', value: '', context: undefined },
+          'text/html',
+          false,
+          true,
+          0,
+        );
+
+        expect(spyWriteHtmlView).toHaveBeenCalledTimes(1);
+        expect(spyWriteHtmlView).toHaveBeenCalledWith(
+          expect.any(PassThrough),
+          request,
+          response,
+        );
+      });
+
+      it('should not call writeHtmlView when Accept header does not contain text/html', async() => {
+        request.headers.accept = 'application/json';
+        const spyWriteHtmlView = jest.spyOn(instance, 'writeHtmlView');
+        const spyWriteServiceDescription = jest.spyOn(instance, 'writeServiceDescription');
+
+        await instance.writeQueryResult(
+          await new QueryEngineFactoryBase().create(),
+          new PassThrough(),
+          new PassThrough(),
+          request,
+          response,
+          { type: 'query', value: '', context: undefined },
+          'application/json',
+          false,
+          true,
+          0,
+        );
+
+        expect(spyWriteHtmlView).toHaveBeenCalledTimes(0);
+        expect(spyWriteServiceDescription).toHaveBeenCalledTimes(1);
+      });
+
+      it('should not call writeHtmlView when query is provided even with text/html Accept header', async() => {
+        const spyWriteHtmlView = jest.spyOn(instance, 'writeHtmlView');
+
+        await instance.writeQueryResult(
+          await new QueryEngineFactoryBase().create(),
+          new PassThrough(),
+          new PassThrough(),
+          request,
+          response,
+          { type: 'query', value: 'SELECT * WHERE { ?s ?p ?o }', context: undefined },
+          'text/html',
+          false,
+          true,
+          0,
+        );
+
+        expect(spyWriteHtmlView).toHaveBeenCalledTimes(0);
+      });
+    });
+
     describe('parseBody', () => {
       let httpRequestMock: any;
       const testRequestBody = 'teststring';
@@ -2080,13 +3110,13 @@ INSERT DATA {
       it('should reject without content-type', async() => {
         httpRequestMock.headers = {};
         await expect(instance.parseBody(httpRequestMock)).rejects
-          .toThrow(`Invalid POST body received, query type could not be determined`);
+          .toThrow(`Invalid request body received, query type could not be determined`);
       });
 
       it('should reject if the query is invalid and the content-type is application/x-www-form-urlencoded', async() => {
         httpRequestMock.headers = { 'content-type': 'application/x-www-form-urlencoded' };
         await expect(instance.parseBody(httpRequestMock)).rejects
-          .toThrow(`Invalid POST body received, query type could not be determined`);
+          .toThrow(`Invalid request body received, query type could not be determined`);
       });
 
       it('should parse query from url if the content-type is application/x-www-form-urlencoded', async() => {
@@ -2134,7 +3164,7 @@ INSERT DATA {
 
       it('should reject if content-type is not application/[sparql-query|x-www-form-urlencoded]', async() => {
         await expect(instance.parseBody(httpRequestMock)).rejects
-          .toThrow(`Invalid POST body received, query type could not be determined`);
+          .toThrow(`Invalid request body received, query type could not be determined`);
       });
 
       it('should return input body if content-type is application/sparql-query', async() => {
@@ -2151,6 +3181,20 @@ INSERT DATA {
           type: 'void',
           value: testRequestBody,
         });
+      });
+
+      it('should reject more than one query parameter', async() => {
+        httpRequestMock = Readable.from([ 'query=ASK%20%7B%7D&query=SELECT%20%2A%20%7B%7D' ]);
+        httpRequestMock.headers = { 'content-type': 'application/x-www-form-urlencoded' };
+        await expect(instance.parseBody(httpRequestMock)).rejects
+          .toThrow(`Invalid request body received, it can only contain a single query or update parameter`);
+      });
+
+      it('should reject more than one update parameter', async() => {
+        httpRequestMock = Readable.from([ 'update=CLEAR%20NAMED&update=CLEAR%20DEFAULT' ]);
+        httpRequestMock.headers = { 'content-type': 'application/x-www-form-urlencoded' };
+        await expect(instance.parseBody(httpRequestMock)).rejects
+          .toThrow(`Invalid request body received, it can only contain a single query or update parameter`);
       });
     });
   });

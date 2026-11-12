@@ -15,19 +15,18 @@ import {
 } from '@comunica/bus-query-process';
 import { KeysInitQuery } from '@comunica/context-entries';
 import type { IActorTest, TestResult } from '@comunica/core';
-import { failTest, passTestVoid, ActionContextKey } from '@comunica/core';
+import { failTest, passTestVoid } from '@comunica/core';
 import type {
   ComunicaDataFactory,
   IActionContext,
   IQueryOperationResult,
   QueryFormatType,
 } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
+import type { Algebra } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { materializeOperation } from '@comunica/utils-query-operation';
-
 import type * as RDF from '@rdfjs/types';
-import type { Algebra } from 'sparqlalgebrajs';
-import { Factory } from 'sparqlalgebrajs';
 
 /**
  * A comunica Sequential Query Process Actor.
@@ -41,10 +40,15 @@ export class ActorQueryProcessSequential extends ActorQueryProcess implements IQ
 
   public constructor(args: IActorQueryProcessSequentialArgs) {
     super(args);
+    this.mediatorContextPreprocess = args.mediatorContextPreprocess;
+    this.mediatorQueryParse = args.mediatorQueryParse;
+    this.mediatorOptimizeQueryOperation = args.mediatorOptimizeQueryOperation;
+    this.mediatorQueryOperation = args.mediatorQueryOperation;
+    this.mediatorMergeBindingsContext = args.mediatorMergeBindingsContext;
   }
 
   public async test(action: IActionQueryProcess): Promise<TestResult<IActorTest>> {
-    if (action.context.get(KeysInitQuery.explain) ?? action.context.get(new ActionContextKey('explain'))) {
+    if (action.context.get(KeysInitQuery.explain)) {
       return failTest(`${this.name} is not able to explain queries.`);
     }
     return passTestVoid();
@@ -84,7 +88,7 @@ export class ActorQueryProcessSequential extends ActorQueryProcess implements IQ
     // Apply initial bindings in context
     if (context.has(KeysInitQuery.initialBindings)) {
       const dataFactory: ComunicaDataFactory = context.getSafe(KeysInitQuery.dataFactory);
-      const algebraFactory = new Factory(dataFactory);
+      const algebraFactory = new AlgebraFactory(dataFactory);
       const bindingsFactory = await BindingsFactory
         .create(this.mediatorMergeBindingsContext, context, dataFactory);
       operation = materializeOperation(
@@ -96,6 +100,7 @@ export class ActorQueryProcessSequential extends ActorQueryProcess implements IQ
       );
 
       // Delete the query string from the context, since our initial query might have changed
+      // TODO: next/major - stop deleting the queryString, see KeysInitQuery.queryString.
       context = context.delete(KeysInitQuery.queryString);
     }
 
@@ -103,6 +108,9 @@ export class ActorQueryProcessSequential extends ActorQueryProcess implements IQ
   }
 
   public async optimize(operation: Algebra.Operation, context: IActionContext): Promise<IQueryProcessSequentialOutput> {
+    // Open a scope that is unique to this query execution, for caches that must not outlive it
+    context = context.set(KeysInitQuery.queryExecutionScope, {});
+
     // Save initial query in context
     context = context.set(KeysInitQuery.query, operation);
 

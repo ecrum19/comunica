@@ -14,9 +14,10 @@ import type { TestResult } from '@comunica/core';
 import { passTestWithSideData, failTest } from '@comunica/core';
 import type { IMediatorTypeJoinCoefficients } from '@comunica/mediatortype-join-coefficients';
 import type { Bindings, BindingsStream, ComunicaDataFactory } from '@comunica/types';
+import type { Algebra } from '@comunica/utils-algebra';
+import { AlgebraFactory, algebraUtils, inScopeVariables } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
-import { getSafeBindings } from '@comunica/utils-query-operation';
-import { Algebra, Factory } from 'sparqlalgebrajs';
+import { getSafeBindings, groupRepeatedSubOperations } from '@comunica/utils-query-operation';
 
 /**
  * A comunica Optional Bind RDF Join Actor.
@@ -33,15 +34,19 @@ export class ActorRdfJoinOptionalBind extends ActorRdfJoin {
       physicalName: 'bind',
       limitEntries: 2,
       canHandleUndefs: true,
-      isLeaf: false,
       requiresVariableOverlap: true,
       canHandleOperationRequired: true,
+      canHandleExpression: true,
     });
+    this.bindOrder = args.bindOrder;
+    this.selectivityModifier = args.selectivityModifier;
+    this.mediatorQueryOperation = args.mediatorQueryOperation;
+    this.mediatorMergeBindingsContext = args.mediatorMergeBindingsContext;
   }
 
   protected async getOutput(action: IActionRdfJoin): Promise<IActorRdfJoinOutputInner> {
     const dataFactory: ComunicaDataFactory = action.context.getSafe(KeysInitQuery.dataFactory);
-    const algebraFactory = new Factory(dataFactory);
+    const algebraFactory = new AlgebraFactory(dataFactory);
     const bindingsFactory = await BindingsFactory.create(
       this.mediatorMergeBindingsContext,
       action.context,
@@ -51,13 +56,14 @@ export class ActorRdfJoinOptionalBind extends ActorRdfJoin {
     action.entries[1].output.bindingsStream.close();
 
     // Bind the right pattern for each binding in the stream
-    const subContext = action.context
-      .set(KeysQueryOperation.joinLeftMetadata, await action.entries[0].output.metadata())
+    const leftMetadata = await action.entries[0].output.metadata();
+    const subContext = groupRepeatedSubOperations(action.context, 'bindings', this.name)
+      .set(KeysQueryOperation.joinLeftMetadata, leftMetadata)
       .set(KeysQueryOperation.joinRightMetadatas, [ await action.entries[1].output.metadata() ]);
     const bindingsStream: BindingsStream = ActorRdfJoinMultiBind.createBindStream(
       this.bindOrder,
       action.entries[0].output.bindingsStream,
-      [ action.entries[1].operation ],
+      [ ActorRdfJoinOptionalBind.getBindOperation(action) ],
       async(operations: Algebra.Operation[], operationBindings: Bindings) => {
         // Send the materialized patterns to the mediator for recursive join evaluation.
         // Length of operations will always be 1
@@ -84,7 +90,25 @@ export class ActorRdfJoinOptionalBind extends ActorRdfJoin {
           true,
         ),
       },
+      physicalPlanMetadata: {
+        bindOrder: this.bindOrder,
+      },
     };
+  }
+
+  /**
+   * The operation to bind left bindings into: the right operation, filtered by the join expression if there is one.
+   * @param action The join action.
+   */
+  public static getBindOperation(action: IActionRdfJoin): Algebra.Operation {
+    if (!action.expression) {
+      return action.entries[1].operation;
+    }
+    const algebraFactory = new AlgebraFactory(action.context.getSafe(KeysInitQuery.dataFactory));
+    const filterOperation = algebraUtils
+      .withMetadata(algebraFactory.createFilter(action.entries[1].operation, action.expression));
+    filterOperation.metadata.isHoistedLeftJoinFilter = true;
+    return filterOperation;
   }
 
   public async getJoinCoefficients(
@@ -96,10 +120,11 @@ export class ActorRdfJoinOptionalBind extends ActorRdfJoin {
     const requestInitialTimes = ActorRdfJoin.getRequestInitialTimes(metadatas);
     const requestItemTimes = ActorRdfJoin.getRequestItemTimes(metadatas);
 
-    // Reject binding on some operation types
-    if (action.entries[1].operation.type === Algebra.types.EXTEND ||
-      action.entries[1].operation.type === Algebra.types.GROUP) {
-      return failTest(`Actor ${this.name} can not bind on Extend and Group operations`);
+    // Reject binding on some operation types (including when reachable through e.g. a Project or Filter wrapper)
+    const boundVariables = inScopeVariables(action.entries[0].operation);
+    const bindOperation = ActorRdfJoinOptionalBind.getBindOperation(action);
+    if (!ActorRdfJoinMultiBind.canBindWithOperation(bindOperation, boundVariables)) {
+      return failTest(`Actor ${this.name} can not bind on Extend, Group, or conflicting LeftJoin/Minus operations`);
     }
 
     // Determine selectivity of join

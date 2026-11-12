@@ -6,8 +6,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION_LOWEST: 18.x
-  NODE_VERSION_HIGHEST: 24.x
+  NODE_VERSION_LOWEST: 22.x
+  NODE_VERSION_HIGHEST: 26.x
 
 jobs:
 
@@ -25,9 +25,9 @@ jobs:
       - name: Ensure line endings are consistent
         run: git config --global core.autocrlf input
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Use Node.js ${{ env.NODE_VERSION_LOWEST }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION_LOWEST }}
           cache: yarn
@@ -37,8 +37,12 @@ jobs:
         run: yarn run build:ts --esModuleInterop true
       - name: Run linter
         run: yarn run lint
+      - name: Type-check tests
+        run: yarn run test:types
       - name: Run depcheck
         run: yarn run depcheck
+      - name: Check actor READMEs
+        run: yarn run readme-check
       - name: Test clean script
         run: yarn run clean
 
@@ -52,18 +56,17 @@ jobs:
           - ubuntu-latest
           - windows-latest
         node-version:
-          - 18.x
-          - 20.x
           - 22.x
           - 24.x
+          - 26.x
     runs-on: ${{ matrix.os }}
     steps:
       - name: Ensure line endings are consistent
         run: git config --global core.autocrlf input
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: yarn
@@ -89,39 +92,38 @@ jobs:
           - ubuntu-latest
           - windows-latest
         node-version:
-          - 18.x
-          - 20.x
           - 22.x
           - 24.x
+          - 26.x
     runs-on: ${{ matrix.os }}
     steps:
       - name: Ensure line endings are consistent
         run: git config --global core.autocrlf input
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: yarn
       - name: Install dependencies and build
         run: yarn install --frozen-lockfile --network-timeout 36000
       - name: Load RDF test suite cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             .rdf-test-suite-cache
             .rdf-test-suite-ldf-cache
           key: ${{ runner.os }}-rdftestsuite-${{ secrets.CACHE_VERSION }}-${{ hashFiles('yarn.lock') }}
       - name: Run specification tests
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 5
           max_attempts: 3
           # Retry because of https://github.com/rubensworks/rdf-test-suite.js/issues/64
           command: yarn run test:spec
       - name: Run integration tests
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           timeout_minutes: 5
           max_attempts: 3
@@ -133,36 +135,74 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        browser:
-          - Chrome
-          - Firefox
-          - Webkit
+        bundler:
+          - webpack
+          - vite
+        include:
+          - bundler: webpack
+            build-script: build:browser:webpack
+            bundle-path: engines/query-sparql/comunica-browser.js
+          - bundler: vite
+            build-script: build:browser:vite
+            bundle-path: engines/query-sparql/comunica-browser-vite.js
     runs-on: ubuntu-latest
     steps:
       - name: Ensure line endings are consistent
         run: git config --global core.autocrlf input
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Use Node.js ${{ env.NODE_VERSION_LOWEST }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION_LOWEST }}
           cache: yarn
       - name: Install dependencies and build
         run: yarn install --frozen-lockfile
-      - name: Install ${{ matrix.browser }} via Playwright
-        if: startsWith(matrix.browser, 'Webkit')
-        # The @L will convert 'Webkit' into lowercase 'webkit' which is the name Playwright expects.
-        run: yarn playwright install --with-deps ${BROWSER_NAME@L}
-        env:
-          BROWSER_NAME: ${{ matrix.browser }}
+      - name: Build browser bundles
+        run: yarn run ${{ matrix.build-script }}
+      - name: Install Playwright browsers
+        run: yarn playwright install --with-deps
       - name: Run browser tests
-        uses: nick-fields/retry@v3
+        run: yarn run test:browser
+        env:
+          COMUNICA_BROWSER_BUNDLE: ${{ matrix.bundle-path }}
+
+  bintest:
+    name: Binary tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure line endings are consistent
+        run: git config --global core.autocrlf input
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Use Node.js ${{ env.NODE_VERSION_LOWEST }}
+        uses: actions/setup-node@v7
         with:
-          timeout_minutes: 2
-          max_attempts: 3
-          # The tests will run on 'WebkitHeadless', 'FirefoxHeadless' and 'ChromeHeadless'
-          command: yarn run test:browser --browsers ${{ matrix.browser }}Headless
+          node-version: ${{ env.NODE_VERSION_LOWEST }}
+          cache: yarn
+      - name: Install dependencies and build monorepo
+        run: yarn install --frozen-lockfile
+      - name: Test binaries
+        run: yarn run test:bins
+
+  configtest:
+    name: Config backwards-compat tests
+    runs-on: ubuntu-latest
+    if: '!startsWith(github.event.head_commit.message, ''Bump to release version'')'
+    steps:
+      - name: Ensure line endings are consistent
+        run: git config --global core.autocrlf input
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Use Node.js ${{ env.NODE_VERSION_LOWEST }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION_LOWEST }}
+          cache: yarn
+      - name: Install dependencies and build monorepo
+        run: yarn install --frozen-lockfile
+      - name: Test current configs in previous versions of Comunica from npm
+        run: yarn run test:config-compat
 
   coveralls:
     name: Coverage check
@@ -183,23 +223,37 @@ jobs:
       - test
       - spectest
       - browsertest
+      - bintest
+      - configtest
+    strategy:
+      fail-fast: false
+      matrix:
+        bundler:
+          - webpack
+          - vite
+        include:
+          - bundler: webpack
+            build-script: build:browser:webpack
+          - bundler: vite
+            build-script: build:browser:vite
     runs-on: ubuntu-latest
     steps:
       - name: Ensure line endings are consistent
         run: git config --global core.autocrlf input
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Use Node.js ${{ env.NODE_VERSION_LOWEST }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION_LOWEST }}
           cache: yarn
       - name: Install dependencies and build
         run: yarn install --frozen-lockfile
       - name: Build browser bundles
-        run: yarn run build:browser
+        run: yarn run ${{ matrix.build-script }}
       - name: Deploy browser builds
-        if: startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/tags/')
+        # Only the webpack bundles are deployed; the vite build is currently CI-only.
+        if: matrix.bundler == 'webpack' && (startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/tags/'))
         run: ./.github/deploy_browser.sh
         env:
           GH_TOKEN: ${{ secrets.PAT }}
@@ -211,14 +265,16 @@ jobs:
       - test
       - spectest
       - browsertest
+      - bintest
+      - configtest
     runs-on: ubuntu-latest
     steps:
       - name: Ensure line endings are consistent
         run: git config --global core.autocrlf input
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Use Node.js ${{ env.NODE_VERSION_LOWEST }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION_LOWEST }}
           cache: yarn
@@ -243,86 +299,252 @@ jobs:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
 
-  performance:
-    name: Performance benchmarks
-    if: startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/feature') || startsWith(github.ref, 'refs/heads/next')
+  bundlesize:
+    name: Bundle sizes
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/feature') || startsWith(github.ref, 'refs/heads/next')
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        benchmark:
-          - watdiv-file
-          - watdiv-tpf
-          - bsbm-file
-          - bsbm-tpf
-          - web
+    permissions:
+      contents: read
+    env:
+      # Pull requests are compared against their base commit, while other runs are stored.
+      BUNDLE_SIZE_BASE: ${{ github.event_name == 'pull_request' }}
     steps:
       - name: Ensure line endings are consistent
         run: git config --global core.autocrlf input
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
+        with:
+          path: head
+      - name: Check out the base commit of the pull request
+        if: env.BUNDLE_SIZE_BASE == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - name: Use Node.js ${{ env.NODE_VERSION_LOWEST }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION_LOWEST }}
+          cache: yarn
+          cache-dependency-path: head/yarn.lock
+      - name: Install dependencies and build monorepo
+        run: yarn install --frozen-lockfile
+        working-directory: head
+      - name: Build browser bundles
+        run: yarn run build:browser:webpack && yarn run build:browser:vite
+        working-directory: head
+      - name: Measure bundle sizes
+        run: node head/packages/utils-monorepo/bin/bundle-sizes.js measure head > bundle-sizes.json
+      - name: Install dependencies and build monorepo of the base commit
+        if: env.BUNDLE_SIZE_BASE == 'true'
+        run: yarn install --frozen-lockfile
+        working-directory: base
+      - name: Build browser bundles of the base commit
+        if: env.BUNDLE_SIZE_BASE == 'true'
+        run: yarn run build:browser:webpack && yarn run build:browser:vite
+        working-directory: base
+      - name: Measure bundle sizes of the base commit
+        # The script of the pull request is used, as the base commit may not have it yet.
+        if: env.BUNDLE_SIZE_BASE == 'true'
+        run: node head/packages/utils-monorepo/bin/bundle-sizes.js measure base > bundle-sizes-base.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bundle-sizes
+          path: bundle-sizes*.json
+      - name: Assemble the comparison comment
+        # Posted by the performance-comment workflow, as this job
+        # receives a read-only GITHUB_TOKEN on pull requests from forks.
+        if: env.BUNDLE_SIZE_BASE == 'true'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          node head/packages/utils-monorepo/bin/bundle-sizes.js compare \
+            bundle-sizes.json bundle-sizes-base.json "$HEAD_SHA" "$BASE_SHA" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            "https://comunica.github.io/comunica-performance-results/comunica/$BASE_REF/bundle-sizes/" > comparison-comment.md
+          echo "$PULL_REQUEST_NUMBER" > comparison-pull-request.txt
+          cat comparison-comment.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: env.BUNDLE_SIZE_BASE == 'true'
+        with:
+          name: bundle-size-comparison
+          path: |
+            comparison-comment.md
+            comparison-pull-request.txt
+      - name: Determine bundle sizes target directory name
+        if: env.BUNDLE_SIZE_BASE != 'true'
+        run: echo "BUNDLE_SIZE_DATA_DIR_PATH=comunica/${GITHUB_REF#refs/heads/}/bundle-sizes" >> $GITHUB_ENV
+      - name: Store bundle sizes
+        if: env.BUNDLE_SIZE_BASE != 'true'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Bundle sizes
+          tool: customSmallerIsBetter
+          output-file-path: bundle-sizes.json
+          github-token: ${{ secrets.PAT }}
+          auto-push: true
+          # Bundle sizes are deterministic, so any increase above this threshold is real.
+          alert-threshold: '102%'
+          comment-on-alert: true
+          alert-comment-cc-users: '@rubensworks'
+          summary-always: true
+          gh-repository: github.com/comunica/comunica-performance-results
+          gh-pages-branch: master
+          benchmark-data-dir-path: ${{ env.BUNDLE_SIZE_DATA_DIR_PATH }}
+
+  performance:
+    name: Performance benchmarks
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/master') || startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/feature') || startsWith(github.ref, 'refs/heads/next')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The web benchmark is omitted on pull requests, as its query set varies across runs,
+        # which makes its totals incomparable between two runs.
+        benchmark: ${{ github.event_name == 'pull_request' && fromJSON('["watdiv-file", "watdiv-tpf", "bsbm-file", "bsbm-file-10k", "bsbm-tpf", "ldbc-snb-file", "ldbc-snb-bi-file"]') || fromJSON('["watdiv-file", "watdiv-tpf", "bsbm-file", "bsbm-file-10k", "bsbm-tpf", "ldbc-snb-file", "ldbc-snb-bi-file", "web"]') }}
+    env:
+      BENCHMARK_BASE: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Ensure line endings are consistent
+        run: git config --global core.autocrlf input
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          path: head
+      - name: Check out the base commit of the pull request
+        if: env.BENCHMARK_BASE == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
       - name: Use Node.js ${{ env.NODE_VERSION_HIGHEST }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION_HIGHEST }}
           cache: yarn
+          cache-dependency-path: head/yarn.lock
       - name: Install dependencies and build monorepo
         run: yarn install --frozen-lockfile
+        working-directory: head
+      - name: Install dependencies and build monorepo of the base commit
+        if: env.BENCHMARK_BASE == 'true'
+        run: yarn install --frozen-lockfile
+        working-directory: base
+      - name: Run benchmarks of the base commit
+        # A benchmark that is new in the pull request has no base results.
+        if: env.BENCHMARK_BASE == 'true' && hashFiles(format('base/performance/benchmark-{0}/package.json', matrix.benchmark)) != ''
+        run: cd base/performance/benchmark-${{ matrix.benchmark }}/ && yarn run performance:ci
+      - name: Remove containers left behind by the base commit benchmarks
+        # The TPF benchmarks run their LDF server in Docker on fixed ports,
+        # so the benchmarks below must start from the same clean state as the base ones did.
+        if: env.BENCHMARK_BASE == 'true'
+        run: docker ps -aq | xargs -r docker rm -f
       - name: Run benchmarks
-        run: cd performance/benchmark-${{ matrix.benchmark }}/ && yarn run performance:ci
-      - uses: actions/upload-artifact@v4
+        run: cd head/performance/benchmark-${{ matrix.benchmark }}/ && yarn run performance:ci
+      - name: Measure ingestion of the base commit
+        if: env.BENCHMARK_BASE == 'true' && contains(matrix.benchmark, '-file') && matrix.benchmark != 'ldbc-snb-bi-file' && hashFiles(format('base/performance/benchmark-{0}/package.json', matrix.benchmark)) != ''
+        working-directory: head
+        run: >-
+          node --max-old-space-size=8192 packages/utils-monorepo/bin/performance-ingestion.js
+          ../base/engines/query-sparql-file
+          performance/benchmark-${{ matrix.benchmark }}/generated/dataset.nt
+          ${{ matrix.benchmark }}
+          ../base/performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/ingestion.json
+      - name: Measure ingestion
+        # Excludes ldbc-snb-bi-file, as it shares its dataset with ldbc-snb-file
+        if: contains(matrix.benchmark, '-file') && matrix.benchmark != 'ldbc-snb-bi-file'
+        working-directory: head
+        run: >-
+          node --max-old-space-size=8192 packages/utils-monorepo/bin/performance-ingestion.js
+          engines/query-sparql-file
+          performance/benchmark-${{ matrix.benchmark }}/generated/dataset.nt
+          ${{ matrix.benchmark }}
+          performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/ingestion.json
+      - uses: actions/upload-artifact@v7
         with:
           name: performance-benchmark-${{ matrix.benchmark }}
-          path: performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/
+          path: head/performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/
+      - uses: actions/upload-artifact@v7
+        if: env.BENCHMARK_BASE == 'true' && hashFiles(format('base/performance/benchmark-{0}/package.json', matrix.benchmark)) != ''
+        with:
+          name: performance-benchmark-base-${{ matrix.benchmark }}
+          path: base/performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/
       - name: Print raw output
-        run: cat performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/query-times.csv
+        run: cat head/performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/query-times.csv
+      - name: Print raw output of the base commit
+        if: env.BENCHMARK_BASE == 'true' && hashFiles(format('base/performance/benchmark-{0}/package.json', matrix.benchmark)) != ''
+        run: cat base/performance/benchmark-${{ matrix.benchmark }}/combinations/combination_0/output/query-times.csv
 
   performance-consolidate:
     name: Performance analysis
+    # Pull request results are compared in performance-compare instead, and are never stored.
+    if: github.event_name != 'pull_request'
     needs:
       - misc
       - test
       - spectest
       - browsertest
+      - bintest
+      - configtest
       - performance
     runs-on: ubuntu-latest
     steps:
       - name: Ensure line endings are consistent
         run: git config --global core.autocrlf input
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Use Node.js ${{ env.NODE_VERSION_HIGHEST }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION_HIGHEST }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: performance-benchmark-watdiv-file
           path: performance/benchmark-watdiv-file/combinations/combination_0/output/
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: performance-benchmark-watdiv-tpf
           path: performance/benchmark-watdiv-tpf/combinations/combination_0/output/
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: performance-benchmark-bsbm-file
           path: performance/benchmark-bsbm-file/combinations/combination_0/output/
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-bsbm-file-10k
+          path: performance/benchmark-bsbm-file-10k/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
         with:
           name: performance-benchmark-bsbm-tpf
           path: performance/benchmark-bsbm-tpf/combinations/combination_0/output/
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-ldbc-snb-file
+          path: performance/benchmark-ldbc-snb-file/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-ldbc-snb-bi-file
+          path: performance/benchmark-ldbc-snb-bi-file/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
         with:
           name: performance-benchmark-web
           path: performance/benchmark-web/combinations/combination_0/output/
       - name: Process benchmark detailed results
-        run: npx -p @rubensworks/process-sparql-benchmark-results psbr csv ghbench performance/benchmark-watdiv-file/combinations/combination_0/output/ performance/benchmark-watdiv-tpf/combinations/combination_0/output/ performance/benchmark-bsbm-file/combinations/combination_0/output/ performance/benchmark-bsbm-tpf/combinations/combination_0/output/ performance/benchmark-web/combinations/combination_0/output/ --overrideCombinationLabels WatDiv-File,WatDiv-TPF,BSBM-File,BSBM-TPF,Web --total false --detailed true --name ghbench-detail.json
+        run: npx -p @rubensworks/process-sparql-benchmark-results psbr csv ghbench performance/benchmark-watdiv-file/combinations/combination_0/output/ performance/benchmark-watdiv-tpf/combinations/combination_0/output/ performance/benchmark-bsbm-file/combinations/combination_0/output/ performance/benchmark-bsbm-file-10k/combinations/combination_0/output/ performance/benchmark-bsbm-tpf/combinations/combination_0/output/ performance/benchmark-ldbc-snb-file/combinations/combination_0/output/ performance/benchmark-ldbc-snb-bi-file/combinations/combination_0/output/ performance/benchmark-web/combinations/combination_0/output/ --overrideCombinationLabels WatDiv-File,WatDiv-TPF,BSBM-File,BSBM-File-10k,BSBM-TPF,LDBC-SNB-File,LDBC-SNB-BI-File,Web --total false --detailed true --failures --name ghbench-detail.json
       - name: Process benchmark total results
-        run: npx -p @rubensworks/process-sparql-benchmark-results psbr csv ghbench performance/benchmark-watdiv-file/combinations/combination_0/output/ performance/benchmark-watdiv-tpf/combinations/combination_0/output/ performance/benchmark-bsbm-file/combinations/combination_0/output/ performance/benchmark-bsbm-tpf/combinations/combination_0/output/ performance/benchmark-web/combinations/combination_0/output/ --overrideCombinationLabels WatDiv-File,WatDiv-TPF,BSBM-File,BSBM-TPF,Web --total true --detailed false --name ghbench-total.json
+        run: npx -p @rubensworks/process-sparql-benchmark-results psbr csv ghbench performance/benchmark-watdiv-file/combinations/combination_0/output/ performance/benchmark-watdiv-tpf/combinations/combination_0/output/ performance/benchmark-bsbm-file/combinations/combination_0/output/ performance/benchmark-bsbm-file-10k/combinations/combination_0/output/ performance/benchmark-bsbm-tpf/combinations/combination_0/output/ performance/benchmark-ldbc-snb-file/combinations/combination_0/output/ performance/benchmark-ldbc-snb-bi-file/combinations/combination_0/output/ performance/benchmark-web/combinations/combination_0/output/ --overrideCombinationLabels WatDiv-File,WatDiv-TPF,BSBM-File,BSBM-File-10k,BSBM-TPF,LDBC-SNB-File,LDBC-SNB-BI-File,Web --total true --detailed false --name ghbench-total.json
+      - name: Process benchmark ingestion results
+        run: jq -s 'add' performance/*/combinations/combination_0/output/ingestion.json > ghbench-ingestion.json
       - name: Determine benchmark detailed results target directory name
         run: echo "BENCHMARK_DATA_DIR_PATH_DETAIL=comunica/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-detail" >> $GITHUB_ENV
       - name: Determine benchmarks total results target directory name
         run: echo "BENCHMARK_DATA_DIR_PATH_TOTAL=comunica/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-total" >> $GITHUB_ENV
+      - name: Determine benchmarks ingestion results target directory name
+        run: echo "BENCHMARK_DATA_DIR_PATH_INGESTION=comunica/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-ingestion" >> $GITHUB_ENV
       - name: Finalize benchmarks detailed results
         uses: benchmark-action/github-action-benchmark@v1
         with:
@@ -353,12 +575,166 @@ jobs:
           gh-repository: github.com/comunica/comunica-performance-results
           gh-pages-branch: master
           benchmark-data-dir-path: ${{ env.BENCHMARK_DATA_DIR_PATH_TOTAL }}
+      - name: Cleanup benchmark-action data
+        run: rm -rf ./benchmark-data-repository
+      - name: Finalize benchmarks ingestion results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Benchmarks ingestion results
+          tool: customSmallerIsBetter
+          output-file-path: ghbench-ingestion.json
+          github-token: ${{ secrets.PAT }}
+          auto-push: true
+          alert-threshold: '130%'
+          comment-always: true
+          comment-on-alert: true
+          alert-comment-cc-users: '@rubensworks'
+          summary-always: true
+          gh-repository: github.com/comunica/comunica-performance-results
+          gh-pages-branch: master
+          benchmark-data-dir-path: ${{ env.BENCHMARK_DATA_DIR_PATH_INGESTION }}
       - name: Prepare comment on commit with link to performance results
-        run: echo -e "Performance benchmarks succeeded! 🚀\n\n\[[Summarized results](https://comunica.github.io/comunica-performance-results/comunica/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-total/)\] \[[Detailed results](https://comunica.github.io/comunica-performance-results/comunica/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-detail/)\]" > ./commit-comment-body.txt
+        run: |
+          echo -e "Performance benchmarks succeeded! 🚀\n\n\[[Summarized results](https://comunica.github.io/comunica-performance-results/comunica/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-total/)\] \[[Detailed results](https://comunica.github.io/comunica-performance-results/comunica/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-detail/)\] \[[Ingestion results](https://comunica.github.io/comunica-performance-results/comunica/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/benchmarks-ingestion/)\] \[[Bundle sizes](https://comunica.github.io/comunica-performance-results/comunica/${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}/bundle-sizes/)\]" > ./commit-comment-body.txt
+          # Failed queries have no time, so they are listed separately
+          jq -r '
+            map(select((.name | endswith(" - failed queries")) and .value > 0))
+            | select(length > 0)
+            | "\n:warning: Some queries failed:\n" + (map("- `\(.name | sub(" - failed queries$"; ""))`: \(.extra)") | join("\n"))
+          ' ghbench-detail.json >> ./commit-comment-body.txt
       - name: Comment on commit with link to performance results
-        uses: peter-evans/commit-comment@v3
+        uses: peter-evans/commit-comment@v4
         with:
           body-path: ./commit-comment-body.txt
+
+  performance-compare:
+    name: Performance comparison
+    if: github.event_name == 'pull_request'
+    needs:
+      - performance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Ensure line endings are consistent
+        run: git config --global core.autocrlf input
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Use Node.js ${{ env.NODE_VERSION_HIGHEST }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION_HIGHEST }}
+          cache: yarn
+      - name: Install dependencies
+        # Only needed for running the comparison script with ts-node, so the monorepo is not built
+        run: yarn install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-watdiv-file
+          path: performance/benchmark-watdiv-file/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-watdiv-tpf
+          path: performance/benchmark-watdiv-tpf/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-bsbm-file
+          path: performance/benchmark-bsbm-file/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-bsbm-file-10k
+          path: performance/benchmark-bsbm-file-10k/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-bsbm-tpf
+          path: performance/benchmark-bsbm-tpf/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-ldbc-snb-file
+          path: performance/benchmark-ldbc-snb-file/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-ldbc-snb-bi-file
+          path: performance/benchmark-ldbc-snb-bi-file/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-base-watdiv-file
+          path: base/performance/benchmark-watdiv-file/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-base-watdiv-tpf
+          path: base/performance/benchmark-watdiv-tpf/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-base-bsbm-file
+          path: base/performance/benchmark-bsbm-file/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-base-bsbm-file-10k
+          path: base/performance/benchmark-bsbm-file-10k/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        with:
+          name: performance-benchmark-base-bsbm-tpf
+          path: base/performance/benchmark-bsbm-tpf/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        # Missing when the benchmark is new in the pull request
+        continue-on-error: true
+        with:
+          name: performance-benchmark-base-ldbc-snb-file
+          path: base/performance/benchmark-ldbc-snb-file/combinations/combination_0/output/
+      - uses: actions/download-artifact@v8
+        # Missing when the benchmark is new in the pull request
+        continue-on-error: true
+        with:
+          name: performance-benchmark-base-ldbc-snb-bi-file
+          path: base/performance/benchmark-ldbc-snb-bi-file/combinations/combination_0/output/
+      - name: Process benchmark detailed results
+        run: npx -p @rubensworks/process-sparql-benchmark-results psbr csv ghbench performance/benchmark-watdiv-file/combinations/combination_0/output/ performance/benchmark-watdiv-tpf/combinations/combination_0/output/ performance/benchmark-bsbm-file/combinations/combination_0/output/ performance/benchmark-bsbm-file-10k/combinations/combination_0/output/ performance/benchmark-bsbm-tpf/combinations/combination_0/output/ performance/benchmark-ldbc-snb-file/combinations/combination_0/output/ performance/benchmark-ldbc-snb-bi-file/combinations/combination_0/output/ --overrideCombinationLabels WatDiv-File,WatDiv-TPF,BSBM-File,BSBM-File-10k,BSBM-TPF,LDBC-SNB-File,LDBC-SNB-BI-File --total false --detailed true --failures --name ghbench-detail.json
+      - name: Determine base commit benchmark results
+        # Benchmarks that are new in the pull request have no base results
+        run: |
+          dirs="base/performance/benchmark-watdiv-file/combinations/combination_0/output/ base/performance/benchmark-watdiv-tpf/combinations/combination_0/output/ base/performance/benchmark-bsbm-file/combinations/combination_0/output/ base/performance/benchmark-bsbm-file-10k/combinations/combination_0/output/ base/performance/benchmark-bsbm-tpf/combinations/combination_0/output/"
+          labels="WatDiv-File,WatDiv-TPF,BSBM-File,BSBM-File-10k,BSBM-TPF"
+          if [ -f base/performance/benchmark-ldbc-snb-file/combinations/combination_0/output/query-times.csv ]; then
+            dirs="$dirs base/performance/benchmark-ldbc-snb-file/combinations/combination_0/output/"
+            labels="$labels,LDBC-SNB-File"
+          fi
+          if [ -f base/performance/benchmark-ldbc-snb-bi-file/combinations/combination_0/output/query-times.csv ]; then
+            dirs="$dirs base/performance/benchmark-ldbc-snb-bi-file/combinations/combination_0/output/"
+            labels="$labels,LDBC-SNB-BI-File"
+          fi
+          echo "BASE_BENCHMARK_DIRS=$dirs" >> $GITHUB_ENV
+          echo "BASE_BENCHMARK_LABELS=$labels" >> $GITHUB_ENV
+      - name: Process base commit benchmark detailed results
+        run: npx -p @rubensworks/process-sparql-benchmark-results psbr csv ghbench $BASE_BENCHMARK_DIRS --overrideCombinationLabels $BASE_BENCHMARK_LABELS --total false --detailed true --failures --name ghbench-base-detail.json
+      - name: Collect benchmark ingestion results
+        # Benchmarks without base results have no base ingestion results
+        run: |
+          shopt -s nullglob
+          collect() { if [ $# -gt 0 ]; then jq -s 'add' "$@"; else echo '[]'; fi; }
+          collect performance/*/combinations/combination_0/output/ingestion.json > ghbench-ingestion.json
+          collect base/performance/*/combinations/combination_0/output/ingestion.json > ghbench-base-ingestion.json
+      - name: Assemble the comparison comment
+        # Posted by the performance-comment workflow, as this job
+        # receives a read-only GITHUB_TOKEN on pull requests from forks.
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          npx ts-node --transpile-only -O '{"rootDir":"."}' packages/utils-monorepo/bin/performance-comparison.ts \
+            ghbench-detail.json ghbench-base-detail.json "$HEAD_SHA" "$BASE_SHA" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            ghbench-ingestion.json ghbench-base-ingestion.json > comparison-comment.md
+          echo "$PULL_REQUEST_NUMBER" > comparison-pull-request.txt
+          cat comparison-comment.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: performance-comparison
+          path: |
+            comparison-comment.md
+            comparison-pull-request.txt
 
   documentation:
     name: Prepare documentation
@@ -367,9 +743,9 @@ jobs:
       - name: Ensure line endings are consistent
         run: git config --global core.autocrlf input
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Use Node.js ${{ env.NODE_VERSION_LOWEST }}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION_LOWEST }}
           cache: yarn
@@ -378,7 +754,7 @@ jobs:
       - name: Build documentation
         run: yarn run doc
       - name: Prepare artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: documentation
           name: documentation
@@ -390,6 +766,8 @@ jobs:
       - test
       - spectest
       - browsertest
+      - bintest
+      - configtest
       - documentation
     runs-on: ubuntu-latest
     # The documentation is only published for master branch
@@ -403,6 +781,6 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
         with:
           artifact_name: documentation

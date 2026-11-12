@@ -1,11 +1,14 @@
 import { Readable } from 'node:stream';
-import { KeysInitQuery } from '@comunica/context-entries';
+import { KeysInitQuery, KeysQueryOperation } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
-import type { BindingsStream, IActionContext } from '@comunica/types';
+import type { BindingsStream, DereferenceFromNamedConflictMode, IActionContext } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
+import { compareTerms } from '@comunica/utils-iterator';
 import { MetadataValidationState } from '@comunica/utils-metadata';
+import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
-import { Factory } from 'sparqlalgebrajs';
+import { defaultTermComparator } from 'rdf-stores';
 import { streamifyArray } from 'streamify-array';
 import {
   ActorQuerySourceIdentifyHypermediaNone,
@@ -15,11 +18,26 @@ import '@comunica/utils-jest';
 const quad = require('rdf-quad');
 
 const DF = new DataFactory();
-const AF = new Factory();
+const AF = new AlgebraFactory();
 const BF = new BindingsFactory(DF);
 const v1 = DF.variable('v1');
 const v2 = DF.variable('v2');
 const v3 = DF.variable('v3');
+const XSD_INTEGER = DF.namedNode('http://www.w3.org/2001/XMLSchema#integer');
+const OBJECTS: RDF.Quad_Object[] = [
+  DF.namedNode('http://example.org/b'),
+  DF.literal('a', { language: 'en', direction: 'rtl' }),
+  DF.literal('9', XSD_INTEGER),
+  DF.blankNode('b1'),
+  DF.literal('a', 'en'),
+  DF.literal('10', XSD_INTEGER),
+  DF.quad(DF.namedNode('http://example.org/s'), DF.namedNode('http://example.org/p'), DF.literal('o')),
+  DF.literal('a'),
+  DF.namedNode('http://example.org/a'),
+  DF.literal('a', 'de'),
+  DF.literal('a', { language: 'en', direction: 'ltr' }),
+  DF.blankNode('b0'),
+];
 
 const mediatorMergeBindingsContext: any = {
   mediate: () => ({}),
@@ -37,7 +55,11 @@ describe('ActorQuerySourceIdentifyHypermediaNone', () => {
     let context: IActionContext;
 
     beforeEach(() => {
-      actor = new ActorQuerySourceIdentifyHypermediaNone({ name: 'actor', bus, mediatorMergeBindingsContext });
+      actor = new ActorQuerySourceIdentifyHypermediaNone({
+        name: 'actor',
+        bus,
+        mediatorMergeBindingsContext,
+      });
       context = new ActionContext({ [KeysInitQuery.dataFactory.name]: DF });
     });
 
@@ -61,13 +83,18 @@ describe('ActorQuerySourceIdentifyHypermediaNone', () => {
       })).resolves.toEqual({
         state: expect.any(MetadataValidationState),
         cardinality: { type: 'exact', value: 2 },
-        availableOrders: undefined,
-        order: undefined,
         variables: [
           { variable: v1, canBeUndef: false },
           { variable: v2, canBeUndef: false },
           { variable: v3, canBeUndef: false },
         ],
+        // The full scan is served by the GSOP index.
+        termOrder: [
+          { term: v1, direction: 'asc' },
+          { term: v3, direction: 'asc' },
+          { term: v2, direction: 'asc' },
+        ],
+        canSeek: true,
         requestTime: 0,
       });
       await expect(stream).toEqualBindingsStream([
@@ -98,12 +125,15 @@ describe('ActorQuerySourceIdentifyHypermediaNone', () => {
       })).resolves.toEqual({
         state: expect.any(MetadataValidationState),
         cardinality: { type: 'estimate', value: 2 },
-        availableOrders: undefined,
-        order: undefined,
         variables: [
           { variable: v1, canBeUndef: false },
           { variable: v2, canBeUndef: false },
         ],
+        // The order stops at the repeated variable.
+        termOrder: [
+          { term: v1, direction: 'asc' },
+        ],
+        canSeek: true,
         requestTime: 0,
       });
       await expect(stream).toEqualBindingsStream([
@@ -112,6 +142,82 @@ describe('ActorQuerySourceIdentifyHypermediaNone', () => {
           v2: DF.namedNode('p2'),
         }),
       ]);
+    });
+
+    it('loads into a default store with nonOrderedStore', async() => {
+      actor = new ActorQuerySourceIdentifyHypermediaNone({
+        name: 'actor',
+        bus,
+        mediatorMergeBindingsContext,
+        nonOrderedStore: true,
+      });
+      const quads = streamifyArray([ quad('s2', 'p1', 'o1'), quad('s1', 'p1', 'o2') ]);
+      const { source } = await actor.run({ metadata: <any> null, quads, url: '', context });
+      const store: any = (<any> source).source;
+      expect(store.indexOrders).toEqual([]);
+      // The default store keeps insertion order.
+      const bindings = await source.queryBindings(
+        AF.createPattern(DF.variable('s'), DF.namedNode('p1'), DF.variable('o')),
+        new ActionContext(),
+      ).toArray();
+      expect(bindings.map(b => b.get(DF.variable('s'))!.value)).toEqual([ 's2', 's1' ]);
+    });
+
+    it('stores a stream into a default store unless asked otherwise', async() => {
+      const store: any = await ActorQuerySourceIdentifyHypermediaNone
+        .storeStream(streamifyArray([ quad('s1', 'p1', 'o1') ]));
+      expect(store.size).toBe(1);
+      expect(store.indexOrders).toEqual([]);
+    });
+
+    describe('with an ordered store by default', () => {
+      it('loads into an ordered store, with the default indexes of createOrdered', async() => {
+        const quads = streamifyArray([ quad('s1', 'p1', 'o1') ]);
+        const { source } = await actor.run({ metadata: <any> null, quads, url: '', context });
+        const store: any = (<any> source).source;
+        expect(store.indexOrders.map((order: string[]) => order.map(component => component[0]).join('')))
+          .toEqual([ 'gsop', 'gpso', 'gops' ]);
+      });
+
+      it('scans in the term order, and says so in the metadata', async() => {
+        const quads = streamifyArray([
+          quad('s2', 'p1', 'o1'),
+          quad('s1', 'p1', 'o2'),
+        ]);
+        const { source } = await actor.run({ metadata: <any> null, quads, url: '', context });
+        const stream = source.queryBindings(
+          AF.createPattern(DF.variable('s'), DF.namedNode('p1'), DF.variable('o')),
+          new ActionContext(),
+        );
+        const metadata: any = await new Promise(resolve => stream.getProperty('metadata', resolve));
+        expect(metadata.order).toBeUndefined();
+        expect(metadata.termOrder).toEqual([
+          { term: DF.variable('s'), direction: 'asc' },
+          { term: DF.variable('o'), direction: 'asc' },
+        ]);
+        expect(metadata.canSeek).toBe(true);
+        const bindings = await stream.toArray();
+        expect(bindings.map(b => b.get(DF.variable('s'))!.value)).toEqual([ 's1', 's2' ]);
+      });
+
+      it('scans in the order of compareTerms', async() => {
+        const quads = streamifyArray(OBJECTS.map(object => DF.quad(DF.namedNode('s'), DF.namedNode('p'), object)));
+        const { source } = await actor.run({ metadata: <any> null, quads, url: '', context });
+        const bindings = await source.queryBindings(
+          AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.variable('o')),
+          new ActionContext(),
+        ).toArray();
+        expect(bindings.map(b => b.get(DF.variable('o')))).toEqual([ ...OBJECTS ].sort(compareTerms));
+      });
+
+      it('relies on the default term order of rdf-stores being the one of compareTerms', () => {
+        const terms: RDF.Term[] = [ ...OBJECTS, DF.defaultGraph(), DF.variable('v') ];
+        for (const left of terms) {
+          for (const right of terms) {
+            expect(Math.sign(defaultTermComparator(left, right))).toBe(Math.sign(compareTerms(left, right)));
+          }
+        }
+      });
     });
 
     it('should run and delegate error events', async() => {
@@ -136,6 +242,160 @@ describe('ActorQuerySourceIdentifyHypermediaNone', () => {
         });
         stream.on('end', () => reject(new Error('Got no error event.')));
       })).resolves.toEqual(new Error('Dummy error'));
+    });
+
+    describe.each([
+      [ 'a default', false ],
+      [ 'an ordered', true ],
+    ])('with a sourceAsNamedGraph-tagged context and %s store', (_, ordered) => {
+      const namedGraph = DF.namedNode('http://example.org/g');
+
+      beforeEach(() => {
+        actor = new ActorQuerySourceIdentifyHypermediaNone({
+          name: 'actor',
+          bus,
+          mediatorMergeBindingsContext,
+          nonOrderedStore: !ordered,
+        });
+        context = context.set(KeysQueryOperation.sourceAsNamedGraph, namedGraph);
+      });
+
+      it('should rewrite default-graph quads to the tagged named graph', async() => {
+        const quads = streamifyArray([
+          quad('s1', 'p1', 'o1'),
+          quad('s2', 'p2', 'o2'),
+        ]);
+        const { source } = await actor.run({ metadata: <any> null, quads, url: 'URL', context });
+
+        // Hidden from plain (default graph) patterns.
+        await expect(source.queryBindings(AF.createPattern(v1, v2, v3), new ActionContext()))
+          .toEqualBindingsStream([]);
+
+        // Visible through GRAPH <namedGraph> { ... }.
+        await expect(source.queryBindings(AF.createPattern(v1, v2, v3, namedGraph), new ActionContext()))
+          .toEqualBindingsStream([
+            BF.fromRecord({ v1: DF.namedNode('s1'), v2: DF.namedNode('p1'), v3: DF.namedNode('o1') }),
+            BF.fromRecord({ v1: DF.namedNode('s2'), v2: DF.namedNode('p2'), v3: DF.namedNode('o2') }),
+          ]);
+      });
+
+      it('should reject when the source already contains a named graph (default conflict mode)', async() => {
+        const quads = streamifyArray([
+          quad('s1', 'p1', 'o1'),
+          quad('s2', 'p2', 'o2', 'http://example.org/existing-graph'),
+        ]);
+        await expect(actor.run({ metadata: <any> null, quads, url: 'URL', context }))
+          .rejects.toThrow(/existing named graph 'http:\/\/example\.org\/existing-graph'/u);
+      });
+
+      describe('with dereferenceFromNamedConflictMode resolving to "error"', () => {
+        beforeEach(() => {
+          context = context.set(KeysInitQuery.dereferenceFromNamedConflictMode, () => 'error');
+        });
+
+        it('should reject when the source already contains a named graph', async() => {
+          const quads = streamifyArray([
+            quad('s1', 'p1', 'o1'),
+            quad('s2', 'p2', 'o2', 'http://example.org/existing-graph'),
+          ]);
+          await expect(actor.run({ metadata: <any> null, quads, url: 'URL', context }))
+            .rejects.toThrow(/existing named graph 'http:\/\/example\.org\/existing-graph'/u);
+        });
+      });
+
+      describe('with dereferenceFromNamedConflictMode resolving to "preferNamed"', () => {
+        beforeEach(() => {
+          context = context.set(KeysInitQuery.dereferenceFromNamedConflictMode, () => 'preferNamed');
+        });
+
+        it('should rewrite an existing named graph to the tagged named graph too', async() => {
+          const existingGraph = DF.namedNode('http://example.org/existing-graph');
+          const quads = streamifyArray([
+            quad('s1', 'p1', 'o1'),
+            quad('s2', 'p2', 'o2', existingGraph.value),
+          ]);
+          const { source } = await actor.run({ metadata: <any> null, quads, url: 'URL', context });
+
+          // Both quads now live under the tagged named graph.
+          await expect(source.queryBindings(AF.createPattern(v1, v2, v3, namedGraph), new ActionContext()))
+            .toEqualBindingsStream([
+              BF.fromRecord({ v1: DF.namedNode('s1'), v2: DF.namedNode('p1'), v3: DF.namedNode('o1') }),
+              BF.fromRecord({ v1: DF.namedNode('s2'), v2: DF.namedNode('p2'), v3: DF.namedNode('o2') }),
+            ]);
+
+          // Nothing is left under the original named graph.
+          await expect(source.queryBindings(AF.createPattern(v1, v2, v3, existingGraph), new ActionContext()))
+            .toEqualBindingsStream([]);
+        });
+      });
+
+      describe('with dereferenceFromNamedConflictMode resolving to "keepSource"', () => {
+        beforeEach(() => {
+          context = context.set(KeysInitQuery.dereferenceFromNamedConflictMode, () => 'keepSource');
+        });
+
+        it('should rewrite default-graph quads but leave an existing named graph untouched', async() => {
+          const existingGraph = DF.namedNode('http://example.org/existing-graph');
+          const quads = streamifyArray([
+            quad('s1', 'p1', 'o1'),
+            quad('s2', 'p2', 'o2', existingGraph.value),
+          ]);
+          const { source } = await actor.run({ metadata: <any> null, quads, url: 'URL', context });
+
+          // The default-graph quad moved to the tagged named graph.
+          await expect(source.queryBindings(AF.createPattern(v1, v2, v3, namedGraph), new ActionContext()))
+            .toEqualBindingsStream([
+              BF.fromRecord({ v1: DF.namedNode('s1'), v2: DF.namedNode('p1'), v3: DF.namedNode('o1') }),
+            ]);
+
+          // The already-named-graph quad stayed under its own, original graph.
+          await expect(source.queryBindings(AF.createPattern(v1, v2, v3, existingGraph), new ActionContext()))
+            .toEqualBindingsStream([
+              BF.fromRecord({ v1: DF.namedNode('s2'), v2: DF.namedNode('p2'), v3: DF.namedNode('o2') }),
+            ]);
+        });
+      });
+
+      describe('with a resolver that differentiates per quad', () => {
+        it('should apply a different conflict mode to each existing named graph', async() => {
+          const graphA = DF.namedNode('http://example.org/graph-a');
+          const graphB = DF.namedNode('http://example.org/graph-b');
+          const resolveConflictMode = jest.fn(
+            (quad: RDF.Quad): DereferenceFromNamedConflictMode =>
+              quad.graph.equals(graphA) ? 'keepSource' : 'preferNamed',
+          );
+          context = context.set(KeysInitQuery.dereferenceFromNamedConflictMode, resolveConflictMode);
+
+          const quads = streamifyArray([
+            quad('s1', 'p1', 'o1', graphA.value),
+            quad('s2', 'p2', 'o2', graphA.value),
+            quad('s3', 'p3', 'o3', graphB.value),
+            quad('s4', 'p4', 'o4', graphB.value),
+          ]);
+          const { source } = await actor.run({ metadata: <any> null, quads, url: 'URL', context });
+
+          // GraphA's quads stay under their own graph.
+          await expect(source.queryBindings(AF.createPattern(v1, v2, v3, graphA), new ActionContext()))
+            .toEqualBindingsStream([
+              BF.fromRecord({ v1: DF.namedNode('s1'), v2: DF.namedNode('p1'), v3: DF.namedNode('o1') }),
+              BF.fromRecord({ v1: DF.namedNode('s2'), v2: DF.namedNode('p2'), v3: DF.namedNode('o2') }),
+            ]);
+
+          // GraphB's quads are rewritten into the tagged named graph instead.
+          await expect(source.queryBindings(AF.createPattern(v1, v2, v3, namedGraph), new ActionContext()))
+            .toEqualBindingsStream([
+              BF.fromRecord({ v1: DF.namedNode('s3'), v2: DF.namedNode('p3'), v3: DF.namedNode('o3') }),
+              BF.fromRecord({ v1: DF.namedNode('s4'), v2: DF.namedNode('p4'), v3: DF.namedNode('o4') }),
+            ]);
+
+          // GraphB no longer exists on its own.
+          await expect(source.queryBindings(AF.createPattern(v1, v2, v3, graphB), new ActionContext()))
+            .toEqualBindingsStream([]);
+
+          // The resolver is invoked for every quad that has a named graph of its own.
+          expect(resolveConflictMode).toHaveBeenCalledTimes(4);
+        });
+      });
     });
   });
 });

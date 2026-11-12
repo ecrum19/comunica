@@ -8,8 +8,8 @@ import { KeysInitQuery } from '@comunica/context-entries';
 import type { IActorTest, TestResult } from '@comunica/core';
 import { failTest, passTest } from '@comunica/core';
 import type { ComunicaDataFactory } from '@comunica/types';
+import { Algebra, AlgebraFactory, algebraUtils } from '@comunica/utils-algebra';
 import type * as RDF from '@rdfjs/types';
-import { Algebra, Factory } from 'sparqlalgebrajs';
 
 /**
  * A comunica Describe To Constructs Subject Optimize Query Operation Actor.
@@ -20,18 +20,51 @@ export class ActorOptimizeQueryOperationDescribeToConstructsSubject extends Acto
   }
 
   public async test(action: IActionOptimizeQueryOperation): Promise<TestResult<IActorTest>> {
-    if (action.operation.type !== Algebra.types.DESCRIBE) {
-      return failTest(`Actor ${this.name} only supports describe operations, but got ${action.operation.type}`);
+    // Describes can be wrapped in a FROM (NAMED) dataset or a LIMIT/OFFSET slice,
+    // so they are not necessarily the outermost operation
+    let found = false;
+    algebraUtils.visitOperation(action.operation, {
+      [Algebra.Types.DESCRIBE]: { preVisitor: () => {
+        found = true;
+        return { continue: false };
+      } },
+    });
+    if (!found) {
+      return failTest(
+        `Actor ${this.name} only supports operations containing a describe, but got ${action.operation.type}`,
+      );
     }
     return passTest(true);
   }
 
   public async run(action: IActionOptimizeQueryOperation): Promise<IActorOptimizeQueryOperationOutput> {
     const dataFactory: ComunicaDataFactory = action.context.getSafe(KeysInitQuery.dataFactory);
-    const algebraFactory = new Factory(dataFactory);
+    const algebraFactory = new AlgebraFactory(dataFactory);
 
-    const operationOriginal: Algebra.Describe = <Algebra.Describe> action.operation;
+    // Describes can be wrapped in a FROM (NAMED) dataset or a LIMIT/OFFSET slice,
+    // so they are not necessarily the outermost operation
+    const operation = algebraUtils.mapOperation(action.operation, {
+      [Algebra.Types.DESCRIBE]: {
+        // Describes can not be nested, so there is no need to look inside of one
+        preVisitor: () => ({ continue: false }),
+        transform: describe => this.describeToConstructs(describe, dataFactory, algebraFactory),
+      },
+    });
 
+    return { operation, context: action.context };
+  }
+
+  /**
+   * Rewrite a describe operation into a union of construct operations.
+   * @param {Algebra.Describe} operationOriginal The describe operation to rewrite.
+   * @param {ComunicaDataFactory} dataFactory The data factory.
+   * @param {AlgebraFactory} algebraFactory The algebra factory.
+   */
+  protected describeToConstructs(
+    operationOriginal: Algebra.Describe,
+    dataFactory: ComunicaDataFactory,
+    algebraFactory: AlgebraFactory,
+  ): Algebra.Operation {
     // Create separate construct queries for all non-variable terms
     const operations: Algebra.Construct[] = operationOriginal.terms
       .filter(term => term.termType !== 'Variable')
@@ -47,17 +80,10 @@ export class ActorOptimizeQueryOperationDescribeToConstructsSubject extends Acto
 
         // eslint-disable-next-line unicorn/no-array-for-each
         patterns.forEach((templatePattern: any) => templatePattern.type = 'pattern');
-        const templateOperation: Algebra.Operation = {
-          type: Algebra.types.BGP,
-          patterns: <Algebra.Pattern[]> patterns,
-        };
+        const templateOperation = algebraFactory.createBgp(<Algebra.Pattern[]> patterns);
 
         // Create a construct query
-        return <Algebra.Construct> {
-          input: templateOperation,
-          template: <Algebra.Pattern[]> patterns,
-          type: 'construct',
-        };
+        return algebraFactory.createConstruct(templateOperation, <Algebra.Pattern[]> patterns);
       });
 
     // If we have variables in the term list,
@@ -84,22 +110,13 @@ export class ActorOptimizeQueryOperationDescribeToConstructsSubject extends Acto
 
       // Add a single construct for the variables
       // This requires a join between the input pattern and our variable patterns that form a simple BGP
-      operations.push({
-        input: {
-          type: Algebra.types.JOIN,
-          input: [
-            operationOriginal.input,
-            { type: Algebra.types.BGP, patterns: variablePatterns },
-          ],
-        },
-        template: variablePatterns,
-        type: Algebra.types.CONSTRUCT,
-      });
+      operations.push(algebraFactory.createConstruct(
+        algebraFactory.createJoin([ operationOriginal.input, algebraFactory.createBgp(variablePatterns) ]),
+        variablePatterns,
+      ));
     }
 
     // Union the construct operations
-    const operation = algebraFactory.createUnion(operations, false);
-
-    return { operation, context: action.context };
+    return algebraFactory.createUnion(operations, false);
   }
 }

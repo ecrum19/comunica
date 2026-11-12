@@ -1,12 +1,9 @@
 import { TermFunctionRegex } from '@comunica/actor-function-factory-term-regex';
 import { TermFunctionBase } from '@comunica/bus-function-factory';
-import type {
-  StringLiteral,
-
-  LangStringLiteral,
-} from '@comunica/utils-expression-evaluator';
+import type { DirLangStringLiteral, LangStringLiteral, StringLiteral } from '@comunica/utils-expression-evaluator';
 import {
   declare,
+  dirLangString,
   langString,
   SparqlOperator,
   string,
@@ -34,6 +31,13 @@ export class TermFunctionReplace extends TermFunctionBase {
             return langString(result, arg.language);
           },
         )
+        .set(
+          [ TypeURL.RDF_DIR_LANG_STRING, TypeURL.XSD_STRING, TypeURL.XSD_STRING ],
+          () => ([ arg, pattern, replacement ]: [DirLangStringLiteral, StringLiteral, StringLiteral]) => {
+            const result = TermFunctionReplace.replace(arg.typedValue, pattern.typedValue, replacement.typedValue);
+            return dirLangString(result, arg.language, arg.direction);
+          },
+        )
         .onQuaternaryTyped(
           [ TypeURL.XSD_STRING, TypeURL.XSD_STRING, TypeURL.XSD_STRING, TypeURL.XSD_STRING ],
           () => (arg: string, pattern: string, replacement: string, flags: string) =>
@@ -50,6 +54,19 @@ export class TermFunctionReplace extends TermFunctionBase {
               flags.typedValue,
             );
             return langString(result, arg.language);
+          },
+        )
+        .set(
+          [ TypeURL.RDF_DIR_LANG_STRING, TypeURL.XSD_STRING, TypeURL.XSD_STRING, TypeURL.XSD_STRING ],
+          () => ([ arg, pattern, replacement, flags ]:
+          [DirLangStringLiteral, StringLiteral, StringLiteral, StringLiteral]) => {
+            const result = TermFunctionReplace.replace(
+              arg.typedValue,
+              pattern.typedValue,
+              replacement.typedValue,
+              flags.typedValue,
+            );
+            return dirLangString(result, arg.language, arg.direction);
           },
         )
         .collect(),

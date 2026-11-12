@@ -7,6 +7,7 @@ import { ActionContext, Bus } from '@comunica/core';
 import type {
   IActionContext,
   IQueryOperationResultBindings,
+  MetadataBindings,
   MetadataQuads,
 } from '@comunica/types';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
@@ -126,7 +127,7 @@ describe('ActorQueryOperationUnion', () => {
       stream: new ArrayIterator([
         BF.bindings([[ DF.variable('b'), DF.literal('1') ]]),
         BF.bindings([[ DF.variable('b'), DF.literal('2') ]]),
-      ]),
+      ], { autoStart: false }),
       type: 'bindings',
     });
     opq1 = () => ({
@@ -484,6 +485,21 @@ describe('ActorQueryOperationUnion', () => {
       metadatas[0].state.invalidate();
       expect(metadata.state.valid).toBeFalsy();
       expect(invalidListener).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not keep the term order of its inputs', async() => {
+      const metadata: MetadataBindings = {
+        state: new MetadataValidationState(),
+        cardinality: { type: 'exact', value: 1 },
+        variables: [{ variable: DF.variable('a'), canBeUndef: false }],
+        termOrder: [{ term: DF.variable('a'), direction: 'asc' }],
+        canSeek: true,
+      };
+      const metadatas = [ metadata, { ...metadata, state: new MetadataValidationState() }];
+      const union = await ActorQueryOperationUnion
+        .unionMetadata(metadatas, true, context, mediatorRdfMetadataAccumulate);
+      expect(union.termOrder).toBeUndefined();
+      expect(union.canSeek).toBeUndefined();
     });
   });
 

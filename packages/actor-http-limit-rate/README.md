@@ -5,7 +5,9 @@
 An [HTTP](https://github.com/comunica/comunica/tree/master/packages/bus-http) actor that performs rate limiting,
 by spacing out future requests based on past request durations,
 in an attempt to match the number of requests sent per second to the number of responses served per second by the server.
-By default, the actor waits for the first request to fail for a given host prior to spacing out requests.
+By default, the actor waits for the first request to a given host to signal that the server is overloaded,
+via a `429` or `503` response or a network error, prior to spacing out requests.
+Only `429` and `503` responses lead to rate limiting.
 
 This module is part of the [Comunica framework](https://github.com/comunica/comunica),
 and should only be used by [developers that want to build their own query engine](https://comunica.dev/docs/modify/).
@@ -25,7 +27,7 @@ After installing, this package can be added to your engine's configuration as fo
 ```json
 {
   "@context": [
-    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-http-limit-rate/^4.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-http-limit-rate/^5.0.0/components/context.jsonld"
   ],
   "actors": [
     {

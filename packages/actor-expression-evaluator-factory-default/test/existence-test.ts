@@ -1,17 +1,18 @@
 import type { ActorExpressionEvaluatorFactory } from '@comunica/bus-expression-evaluator-factory';
+import { KeysExpressionEvaluator } from '@comunica/context-entries';
 import type { IActionContext } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
+import type { Algebra } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
-import { getMockEEActionContext, getMockEEFactory } from '@comunica/utils-expression-evaluator/test/util/helpers';
+import { getMockEEActionContext, getMockEEFactory } from '@comunica/utils-jest';
 import { ArrayIterator } from 'asynciterator';
 import { DataFactory } from 'rdf-data-factory';
-import { Factory } from 'sparqlalgebrajs';
-import type { Algebra } from 'sparqlalgebrajs';
 
 const DF = new DataFactory();
 const BF = new BindingsFactory(DF, {});
 
 describe('should be able to handle EXIST filters', () => {
-  let factory: Factory;
+  let factory: AlgebraFactory;
   let evaluatorFactory: ActorExpressionEvaluatorFactory;
   let context: IActionContext;
   let mediatorQueryOperation: any;
@@ -30,7 +31,7 @@ describe('should be able to handle EXIST filters', () => {
       }),
     };
 
-    factory = new Factory();
+    factory = new AlgebraFactory();
     evaluatorFactory = getMockEEFactory({ mediatorQueryOperation });
     context = getMockEEActionContext();
   });
@@ -77,7 +78,7 @@ describe('should be able to handle EXIST filters', () => {
   });
 
   it('like an EXIST that errors', async() => {
-    const bindingsStream = new ArrayIterator([{}, {}, {}]).transform({
+    const bindingsStream = new ArrayIterator([{}, {}, {}], { autoStart: false }).transform({
       autoStart: false,
       transform(item, done, push) {
         push(item);
@@ -98,5 +99,42 @@ describe('should be able to handle EXIST filters', () => {
     );
     const evaluator = await evaluatorFactory.run({ context, algExpr: expr }, undefined);
     await expect(evaluator.evaluateAsEBV(BF.bindings())).rejects.toBeTruthy();
+  });
+
+  describe('with an existenceResolver in the context', () => {
+    let existenceResolver: jest.Mock;
+
+    beforeEach(() => {
+      existenceResolver = jest.fn().mockResolvedValue(true);
+      context = context.set(KeysExpressionEvaluator.existenceResolver, existenceResolver);
+      mediatorQueryOperation.mediate = () => {
+        throw new Error('mediatorQueryOperation must not be reached');
+      };
+    });
+
+    it('delegates to the resolver instead of the query operation mediator', async() => {
+      const expr = factory.createExistenceExpression(false, factory.createBgp([]));
+      const bindings = BF.bindings([[ DF.variable('a'), DF.literal('1') ]]);
+
+      const evaluator = await evaluatorFactory.run({ context, algExpr: expr }, undefined);
+      await expect(evaluator.evaluateAsEBV(bindings)).resolves.toBe(true);
+      expect(existenceResolver).toHaveBeenCalledWith(expr, bindings);
+    });
+
+    it('leaves the not flag to the resolver', async() => {
+      existenceResolver.mockResolvedValue(false);
+      const expr = factory.createExistenceExpression(true, factory.createBgp([]));
+
+      const evaluator = await evaluatorFactory.run({ context, algExpr: expr }, undefined);
+      await expect(evaluator.evaluateAsEBV(BF.bindings())).resolves.toBe(false);
+    });
+
+    it('propagates errors thrown by the resolver', async() => {
+      existenceResolver.mockRejectedValue(new Error('Resolver error'));
+      const expr = factory.createExistenceExpression(false, factory.createBgp([]));
+
+      const evaluator = await evaluatorFactory.run({ context, algExpr: expr }, undefined);
+      await expect(evaluator.evaluateAsEBV(BF.bindings())).rejects.toThrow('Resolver error');
+    });
   });
 });

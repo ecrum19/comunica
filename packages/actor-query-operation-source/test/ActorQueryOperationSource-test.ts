@@ -1,4 +1,4 @@
-import { KeysInitQuery } from '@comunica/context-entries';
+import { KeysInitQuery, KeysQueryOperation } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type {
   IActionContext,
@@ -8,17 +8,20 @@ import type {
   IQueryOperationResultVoid,
   IQuerySourceWrapper,
   IPhysicalQueryPlanLogger,
+  IPhysicalQueryPlanNode,
 } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
+import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { assignOperationSource } from '@comunica/utils-query-operation';
-import { ArrayIterator } from 'asynciterator';
+import { ArrayIterator, TransformIterator } from 'asynciterator';
 import { DataFactory } from 'rdf-data-factory';
-import { Factory } from 'sparqlalgebrajs';
 import { ActorQueryOperationSource } from '../lib/ActorQueryOperationSource';
 import 'jest-rdf';
 import '@comunica/utils-jest';
 
-const AF = new Factory();
+const AF = new AlgebraFactory();
 const DF = new DataFactory();
+const BF = new BindingsFactory(DF);
 
 describe('ActorQueryOperationSource', () => {
   let bus: any;
@@ -63,13 +66,148 @@ describe('ActorQueryOperationSource', () => {
       it('should handle operations with top-level source', async() => {
         await expect(actor.test({
           context: new ActionContext(),
-          operation: assignOperationSource(AF.createNop(), <any>{}),
+          operation: assignOperationSource(AF.createNop(), <any>{
+            source: {
+              getSelectorShape() {
+                return {
+                  type: 'operation',
+                  operation: {
+                    operationType: 'wildcard',
+                  },
+                };
+              },
+            },
+          }),
         })).resolves.toPassTest({ httpRequests: 1 });
+      });
+
+      it('should not handle operations with top-level source that does not accept the operation', async() => {
+        await expect(actor.test({
+          context: new ActionContext(),
+          operation: assignOperationSource(AF.createNop(), <any>{
+            source: {
+              getSelectorShape() {
+                return {
+                  type: 'operation',
+                  operation: {
+                    operationType: 'type',
+                    type: 'abc',
+                  },
+                };
+              },
+            },
+          }),
+        }))
+          .resolves.toFailTest(`Actor actor does not accept the operation nop.`);
+      });
+
+      it('should request the selector shape in the context of the source', async() => {
+        const getSelectorShape = jest.fn(() => ({ type: 'operation', operation: { operationType: 'wildcard' }}));
+        const sourceContext = new ActionContext({ key: 'value' });
+        await expect(actor.test({
+          context: new ActionContext(),
+          operation: assignOperationSource(AF.createNop(), <any>{
+            source: { getSelectorShape },
+            context: sourceContext,
+          }),
+        })).resolves.toPassTest({ httpRequests: 1 });
+        expect(getSelectorShape).toHaveBeenCalledWith(new ActionContext({ key: 'value' }));
       });
 
       it('should not handle operations without top-level source', async() => {
         await expect(actor.test({ context: new ActionContext(), operation: AF.createNop() }))
           .resolves.toFailTest(`Actor actor requires an operation with source annotation.`);
+      });
+    });
+
+    describe('run over a silent source', () => {
+      const DFF = DF;
+
+      function silentSource(makeStream: () => any): IQuerySourceWrapper {
+        return <any> {
+          source: { referenceValue: 'silent', queryBindings: jest.fn(makeStream) },
+          context: new ActionContext({ [KeysQueryOperation.silent.name]: true }),
+        };
+      }
+
+      function silentContext(): IActionContext {
+        return new ActionContext({ [KeysInitQuery.dataFactory.name]: DFF });
+      }
+
+      it('should pass results through when the source succeeds', async() => {
+        const wrapper = silentSource(() => {
+          const stream = new ArrayIterator(
+            [ BF.bindings([[ DFF.variable('x'), DFF.literal('1') ]]) ],
+            { autoStart: false },
+          );
+          stream.setProperty('metadata', { cardinality: { type: 'exact', value: 1 }, variables: []});
+          return stream;
+        });
+        const output = <IQueryOperationResultBindings> await actor.run({
+          context: silentContext(),
+          operation: assignOperationSource(AF.createNop(), <any> wrapper),
+        });
+        await expect(output.metadata()).resolves.toEqual({
+          cardinality: { type: 'exact', value: 1 },
+          variables: [],
+        });
+        await expect(output.bindingsStream).toEqualBindingsStream([
+          BF.bindings([[ DFF.variable('x'), DFF.literal('1') ]]),
+        ]);
+      });
+
+      it('should pass results through when the source produces them asynchronously', async() => {
+        const wrapper = silentSource(() => {
+          const stream = new TransformIterator<any>(
+            () => new Promise(resolve => setImmediate(() => resolve(
+              new ArrayIterator([ BF.bindings([[ DFF.variable('x'), DFF.literal('1') ]]) ], { autoStart: false }),
+            ))),
+            { autoStart: false },
+          );
+          stream.setProperty('metadata', { cardinality: { type: 'exact', value: 1 }, variables: []});
+          return stream;
+        });
+        const output = <IQueryOperationResultBindings> await actor.run({
+          context: silentContext(),
+          operation: assignOperationSource(AF.createNop(), <any> wrapper),
+        });
+        await expect(output.bindingsStream).toEqualBindingsStream([
+          BF.bindings([[ DFF.variable('x'), DFF.literal('1') ]]),
+        ]);
+      });
+
+      it('should emit a single empty solution when the source errors', async() => {
+        const wrapper = silentSource(() =>
+          new TransformIterator(() => Promise.reject(new Error('Source down')), { autoStart: false }));
+        const output = <IQueryOperationResultBindings> await actor.run({
+          context: silentContext(),
+          operation: assignOperationSource(AF.createNop(), <any> wrapper),
+        });
+        await expect(output.bindingsStream).toEqualBindingsStream([ BF.bindings() ]);
+        await expect(output.metadata()).resolves.toEqual({
+          state: expect.anything(),
+          cardinality: { type: 'exact', value: 1 },
+          variables: [],
+        });
+      });
+
+      it('should keep results emitted before the source errors', async() => {
+        const wrapper = silentSource(() => {
+          const stream = new ArrayIterator(
+            [ BF.bindings([[ DFF.variable('x'), DFF.literal('1') ]]) ],
+            { autoStart: false },
+          );
+          stream.setProperty('metadata', { cardinality: { type: 'exact', value: 1 }, variables: []});
+          stream.on('end', () => stream.emit('error', new Error('Source down')));
+          return stream;
+        });
+        const output = <IQueryOperationResultBindings> await actor.run({
+          context: silentContext(),
+          operation: assignOperationSource(AF.createNop(), <any> wrapper),
+        });
+        await expect(output.bindingsStream).toEqualBindingsStream([
+          BF.bindings([[ DFF.variable('x'), DFF.literal('1') ]]),
+        ]);
       });
     });
 
@@ -205,13 +343,17 @@ describe('ActorQueryOperationSource', () => {
       });
 
       it('should handle bindings operations and invokes the logger', async() => {
-        const parentNode = '';
-        const logger: IPhysicalQueryPlanLogger = {
-          logOperation: jest.fn(),
-          toJson: jest.fn(),
-          stashChildren: jest.fn(),
-          unstashChild: jest.fn(),
+        const parentNode: IPhysicalQueryPlanNode = <any> { id: 'parent' };
+        const planNode: IPhysicalQueryPlanNode = {
           appendMetadata: jest.fn(),
+          adoptInput: jest.fn(),
+          setOutput: jest.fn(),
+        };
+        const logger: IPhysicalQueryPlanLogger = {
+          logOperation: jest.fn().mockReturnValue(planNode),
+          finalize: jest.fn(),
+          getNodeForOutput: jest.fn(),
+          toJson: jest.fn(),
         };
         ctx = new ActionContext({
           [KeysInitQuery.physicalQueryPlanLogger.name]: logger,
@@ -228,14 +370,51 @@ describe('ActorQueryOperationSource', () => {
         });
         await expect(result.bindingsStream).toEqualBindingsStream([]);
 
-        expect(logger.logOperation).toHaveBeenCalledWith(
-          'nop',
-          undefined,
-          opIn,
+        expect(logger.logOperation).toHaveBeenCalledWith({
+          logicalOperator: 'nop',
           parentNode,
-          'actor',
-          {},
-        );
+          actor: 'actor',
+          operation: opIn,
+        });
+        expect(planNode.setOutput).toHaveBeenCalledWith(result);
+      });
+
+      it('should log the operations that the source handles itself', async() => {
+        const parentNode: IPhysicalQueryPlanNode = <any> { id: 'parent' };
+        const planNode: IPhysicalQueryPlanNode = {
+          appendMetadata: jest.fn(),
+          adoptInput: jest.fn(),
+          setOutput: jest.fn(),
+        };
+        const logger: IPhysicalQueryPlanLogger = {
+          logOperation: jest.fn().mockReturnValue(planNode),
+          getNodeForOutput: jest.fn(),
+          finalize: jest.fn(),
+          toJson: jest.fn(),
+        };
+        ctx = new ActionContext({
+          [KeysInitQuery.physicalQueryPlanLogger.name]: logger,
+          [KeysInitQuery.physicalQueryPlanNode.name]: parentNode,
+        });
+
+        const pattern = AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o'));
+        const opIn = assignOperationSource(AF.createProject(AF.createJoin([ pattern ]), []), source1);
+        await actor.run({ operation: opIn, context: ctx });
+
+        expect(logger.logOperation).toHaveBeenCalledWith({
+          logicalOperator: 'join',
+          parentNode: planNode,
+          actor: 'actor',
+          operation: (<any> opIn).input,
+          metadata: { delegated: true },
+        });
+        expect(logger.logOperation).toHaveBeenCalledWith({
+          logicalOperator: 'pattern',
+          parentNode: planNode,
+          actor: 'actor',
+          operation: pattern,
+          metadata: { delegated: true },
+        });
       });
     });
   });

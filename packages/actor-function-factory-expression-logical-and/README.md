@@ -1,6 +1,6 @@
 # Comunica Expression Function Logical And Function Factory Actor
 
-[![npm version](https://badge.fury.io/js/%40comunica%2Factor-function-factory-expression-function-logical-and.svg)](https://www.npmjs.com/package/@comunica/actor-function-factory-expression-logical-and)
+[![npm version](https://badge.fury.io/js/%40comunica%2Factor-function-factory-expression-logical-and.svg)](https://www.npmjs.com/package/@comunica/actor-function-factory-expression-logical-and)
 
 A [function factory](https://github.com/comunica/comunica/tree/master/packages/bus-function-factory) actor
 that constructs an [expression function](https://github.com/comunica/comunica/tree/master/packages/bus-function-factory/lib/ActorFunctionFactory.ts)
@@ -24,7 +24,7 @@ After installing, this package can be added to your engine's configuration as fo
 {
   "@context": [
     ...
-    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-function-factory-expression-logical-and/^4.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-function-factory-expression-logical-and/^5.0.0/components/context.jsonld"
   ],
   "actors": [
     ...

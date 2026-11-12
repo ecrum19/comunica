@@ -1,6 +1,6 @@
 # Comunica Term Function Multiplication Function Factory Actor
 
-[![npm version](https://badge.fury.io/js/%40comunica%2Factor-function-factory-term-function-multiplication.svg)](https://www.npmjs.com/package/@comunica/actor-function-factory-term-multiplication)
+[![npm version](https://badge.fury.io/js/%40comunica%2Factor-function-factory-term-multiplication.svg)](https://www.npmjs.com/package/@comunica/actor-function-factory-term-multiplication)
 
 A [function factory](https://github.com/comunica/comunica/tree/master/packages/bus-function-factory) actor
 that constructs a [term function](https://github.com/comunica/comunica/tree/master/packages/bus-function-factory/lib/ActorFunctionFactory.ts)
@@ -24,7 +24,7 @@ After installing, this package can be added to your engine's configuration as fo
 {
   "@context": [
     ...
-    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-function-factory-term-multiplication/^4.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/actor-function-factory-term-multiplication/^5.0.0/components/context.jsonld"
   ],
   "actors": [
     ...

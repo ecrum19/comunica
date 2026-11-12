@@ -1,16 +1,20 @@
-import { KeysQueryOperation } from '@comunica/context-entries';
+import { KeysInitQuery, KeysQueryOperation, KeysRdfUpdateQuads } from '@comunica/context-entries';
 import type { TestResult } from '@comunica/core';
 import { failTest, passTestVoid } from '@comunica/core';
 import type {
+  ComunicaDataFactory,
   IActionContext,
+  IDataDestination,
   IQueryOperationResult,
   IQueryOperationResultBindings,
   IQueryOperationResultBoolean,
   IQueryOperationResultQuads,
   IQueryOperationResultVoid,
   IQuerySourceWrapper,
+  IServiceExecutor,
 } from '@comunica/types';
-import type { Algebra } from 'sparqlalgebrajs';
+import type { Algebra } from '@comunica/utils-algebra';
+import type * as RDF from '@rdfjs/types';
 
 /**
  * Safely cast a query operation output to a bindings output.
@@ -100,6 +104,38 @@ export function assignOperationSource<O extends Algebra.Operation>(operation: O,
 }
 
 /**
+ * Obtain the query string that is equivalent to the given operation, which a source may send instead of the operation.
+ * @param operation An algebra operation.
+ * @return The equivalent query string, or undefined if none is attached.
+ */
+export function getOperationEquivalentQueryString(operation: Algebra.Operation): string | undefined {
+  return <string | undefined> operation.metadata?.equivalentQueryString;
+}
+
+/**
+ * Attach an equivalent query string to the given operation, so that its source may send it as-is.
+ * @param operation An operation.
+ * @param equivalentQueryString A query string that is equivalent to the operation.
+ * @return A copy of the operation with the equivalent query string attached.
+ */
+export function assignOperationEquivalentQueryString<O extends Algebra.Operation>(
+  operation: O,
+  equivalentQueryString: string,
+): O {
+  return { ...operation, metadata: { ...operation.metadata, equivalentQueryString }};
+}
+
+/**
+ * Obtain the original query string from the given context, if it is a SPARQL query.
+ * @param context An action context.
+ * @return The original query string, or undefined if it is absent or not SPARQL.
+ */
+export function getOriginalSparqlQueryString(context: IActionContext): string | undefined {
+  const queryFormat = context.get(KeysInitQuery.queryFormat);
+  return !queryFormat || queryFormat.language === 'sparql' ? context.get(KeysInitQuery.queryString) : undefined;
+}
+
+/**
  * Remove the source wrapper from the given operation.
  * The operation is mutated.
  * @param operation An operation.
@@ -108,5 +144,105 @@ export function removeOperationSource(operation: Algebra.Operation): void {
   delete operation.metadata?.scopedSource;
   if (operation.metadata && Object.keys(operation.metadata).length === 0) {
     delete operation.metadata;
+  }
+}
+
+/**
+ * Obtain a function that looks up the custom SERVICE executors that are registered in the given context.
+ * @param context The query context.
+ * @return A function that looks up the executor of a SERVICE target IRI, or undefined if no executors are registered.
+ */
+export function getServiceExecutorLookup(
+  context: IActionContext,
+): ((serviceIri: string) => IServiceExecutor | undefined) | undefined {
+  const serviceExecutors = context.get(KeysInitQuery.serviceExecutors);
+  const serviceExecutorCreator = context.get(KeysInitQuery.serviceExecutorCreator);
+  if (serviceExecutors && serviceExecutorCreator) {
+    throw new Error('Illegal simultaneous usage of serviceExecutorCreator and serviceExecutors in context');
+  }
+  if (serviceExecutors) {
+    return serviceIri => serviceExecutors[serviceIri];
+  }
+  if (serviceExecutorCreator) {
+    const dataFactory: ComunicaDataFactory = context.getSafe(KeysInitQuery.dataFactory);
+    return serviceIri => serviceExecutorCreator(dataFactory.namedNode(serviceIri));
+  }
+}
+
+/**
+ * Obtain the custom SERVICE executor that is registered in the given context for the given SERVICE target.
+ * @param serviceIri The IRI of a SERVICE target.
+ * @param context The query context.
+ * @return The executor, or undefined if none is registered for the IRI.
+ */
+export function getServiceExecutor(serviceIri: string, context: IActionContext): IServiceExecutor | undefined {
+  return getServiceExecutorLookup(context)?.(serviceIri);
+}
+
+/**
+ * Check if the given data destination is a string or RDF store.
+ * @param dataDestination A data destination.
+ */
+export function isDataDestinationRawType(dataDestination: IDataDestination): dataDestination is string | RDF.Store {
+  return typeof dataDestination === 'string' || 'remove' in dataDestination;
+}
+
+/**
+ * Get the data destination type.
+ * @param dataDestination A data destination.
+ */
+export function getDataDestinationType(dataDestination: IDataDestination): string | undefined {
+  if (typeof dataDestination === 'string') {
+    return '';
+  }
+  return 'remove' in dataDestination ? 'rdfjsStore' : dataDestination.type;
+}
+
+/**
+ * Get the data destination value.
+ * @param dataDestination A data destination.
+ */
+export function getDataDestinationValue(dataDestination: IDataDestination): string | RDF.Store {
+  return isDataDestinationRawType(dataDestination) ? dataDestination : dataDestination.value;
+}
+
+/**
+ * Get the context of the given destination, merged with the given context.
+ * @param dataDestination A data destination.
+ * @param context A context to merge with.
+ */
+export function getDataDestinationContext(dataDestination: IDataDestination, context: IActionContext): IActionContext {
+  if (typeof dataDestination === 'string' || 'remove' in dataDestination || !dataDestination.context) {
+    return context;
+  }
+  return context.merge(dataDestination.context);
+}
+
+/**
+ * Get the source destination from the given context.
+ * @param {ActionContext} context An optional context.
+ * @return {IDataDestination} The destination or undefined.
+ */
+export function getContextDestination(context: IActionContext): IDataDestination | undefined {
+  return context.get(KeysRdfUpdateQuads.destination);
+}
+
+/**
+ * Get the destination's raw URL value from the given context.
+ * @param {IDataDestination} destination A destination.
+ * @return {string} The URL or undefined.
+ */
+export function getContextDestinationUrl(destination?: IDataDestination): string | undefined {
+  if (destination) {
+    let fileUrl = getDataDestinationValue(destination);
+    if (typeof fileUrl === 'string') {
+      // Remove hashes from source
+      const hashPosition = fileUrl.indexOf('#');
+      if (hashPosition >= 0) {
+        fileUrl = fileUrl.slice(0, hashPosition);
+      }
+
+      return fileUrl;
+    }
   }
 }

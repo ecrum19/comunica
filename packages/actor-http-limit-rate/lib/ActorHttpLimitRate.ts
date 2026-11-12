@@ -97,12 +97,32 @@ export class ActorHttpLimitRate extends ActorHttp {
         ...action,
         context: action.context.set(ActorHttpLimitRate.keyWrapped, true),
       });
-      registerCompletedRequest(response.ok);
+      // Only responses that signal an overloaded server count as failures.
+      registerCompletedRequest(response.ok || !ActorHttpLimitRate.isOverloadStatus(response.status));
       return response;
     } catch (error: unknown) {
-      registerCompletedRequest(false);
+      // Timeouts and aborts are imposed by the client, so they say nothing about the host's request rate.
+      if (!ActorHttpLimitRate.isClientAbort(error)) {
+        registerCompletedRequest(false);
+      }
       throw error;
     }
+  }
+
+  /**
+   * Check if the given HTTP status code indicates that the server is overloaded.
+   * @param status An HTTP status code.
+   */
+  public static isOverloadStatus(status: number): boolean {
+    return status === 429 || status === 503;
+  }
+
+  /**
+   * Check if the given error was caused by the client timing out or aborting the request.
+   * @param error An error.
+   */
+  public static isClientAbort(error: unknown): boolean {
+    return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
   }
 
   /**
@@ -142,7 +162,7 @@ export interface IActorHttpLimitRateArgs extends IActorHttpArgs {
   /* eslint-disable max-len */
   /**
    * An actor that listens to HTTP invalidation events
-   * @default {<default_invalidator> a <npmd:@comunica/bus-http-invalidate/^4.0.0/components/ActorHttpInvalidateListenable.jsonld#ActorHttpInvalidateListenable>}
+   * @default {<default_invalidator> a <npmd:@comunica/bus-http-invalidate/^5.0.0/components/ActorHttpInvalidateListenable.jsonld#ActorHttpInvalidateListenable>}
    */
   httpInvalidator: ActorHttpInvalidateListenable;
   /* eslint-enable max-len */

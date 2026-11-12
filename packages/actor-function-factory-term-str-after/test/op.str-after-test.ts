@@ -1,6 +1,8 @@
-import { runFuncTestTable } from '@comunica/bus-function-factory/test/util';
-import { bool } from '@comunica/utils-expression-evaluator/test/util/Aliases';
-import { Notation } from '@comunica/utils-expression-evaluator/test/util/TestTable';
+import {
+  runFuncTestTable,
+  bool,
+  Notation,
+} from '@comunica/utils-jest';
 import { ActorFunctionFactoryTermStrAfter } from '../lib';
 
 describe('evaluations of \'strafter\' like', () => {
@@ -16,15 +18,26 @@ describe('evaluations of \'strafter\' like', () => {
     testTable: `
         "abc" "b" = "c"
         "abc"@en "ab" = "c"@en
+        "abc"@en--ltr "ab" = "c"@en--ltr
         "abc"^^xsd:string "" = "abc"^^xsd:string
         "abc" "xyz" = ""
         "abc"@en "z"@en = ""
+        "abc"@en "z" = ""
+        "abc"@en--ltr "z"@en--ltr = ""
+        "abc"@en--ltr "z" = ""
         "abc" "z" = ""
         "abc"@en ""@en = "abc"@en
+        "abc"@en--ltr ""@en--ltr = "abc"@en--ltr
         "abc"@en "" = "abc"@en
       `,
     errorTable: `
+        "abc"@en--ltr "ab"@en = 'Operation on incompatible language literals'
+        "abc"@en--ltr "z"@en = 'Operation on incompatible language literals'
         "abc"@en "b"@cy = 'Operation on incompatible language literals'
+        "abc"@en--ltr "b"@nl--ltr = 'Operation on incompatible language literals'
+        "abc"@en--ltr "b"@en--rtl = 'Operation on incompatible language literals'
+        "abc"@en--ltr "b"@nl = 'Operation on incompatible language literals'
+        "abc"@nl "b"@nl--ltr = 'Operation on incompatible language literals'
       `,
   });
 });

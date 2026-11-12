@@ -1,18 +1,39 @@
-import { KeysInitQuery, KeysQuerySourceIdentify } from '@comunica/context-entries';
+import { KeysHttp, KeysInitQuery, KeysQueryOperation, KeysQuerySourceIdentify } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IQuerySourceWrapper } from '@comunica/types';
+import { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { assignOperationSource } from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
 import { ArrayIterator } from 'asynciterator';
 import { DataFactory } from 'rdf-data-factory';
-import { Algebra, Factory } from 'sparqlalgebrajs';
 import {
   ActorOptimizeQueryOperationPruneEmptySourceOperations,
 } from '../lib/ActorOptimizeQueryOperationPruneEmptySourceOperations';
 import '@comunica/utils-jest';
 
-const AF = new Factory();
+const AF = new AlgebraFactory();
 const DF = new DataFactory();
+
+/**
+ * Match a context that equals the given context, extended with an abort signal for ASK requests.
+ * @param context The expected context without abort signal.
+ */
+function contextWithAbortSignal(context: ActionContext): any {
+  return {
+    asymmetricMatch(actual: ActionContext): boolean {
+      if (!(actual.get(KeysHttp.httpAbortSignal) instanceof AbortSignal)) {
+        return false;
+      }
+      try {
+        expect(actual.delete(KeysHttp.httpAbortSignal)).toEqual(context);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    toString: () => 'contextWithAbortSignal',
+  };
+}
 
 describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
   let bus: any;
@@ -33,21 +54,21 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.NOP,
+                type: Algebra.Types.NOP,
               },
             },
             {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.PATTERN,
+                type: Algebra.Types.PATTERN,
               },
             },
             {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.LINK,
+                type: Algebra.Types.LINK,
               },
             },
           ],
@@ -56,13 +77,13 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
           const bindingsStream = new ArrayIterator([], { autoStart: false });
           let card = 0;
           switch (op.type) {
-            case Algebra.types.NOP:
+            case Algebra.Types.NOP:
               card = 10;
               break;
-            case Algebra.types.PATTERN:
+            case Algebra.Types.PATTERN:
               card = op.predicate.value === 'empty' ? 0 : 10;
               break;
-            case Algebra.types.LINK:
+            case Algebra.Types.LINK:
               card = op.value === 'empty' ? 0 : 10;
               break;
           }
@@ -81,14 +102,14 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.ASK,
+                type: Algebra.Types.ASK,
               },
             },
             {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.NOP,
+                type: Algebra.Types.NOP,
               },
             },
           ],
@@ -329,6 +350,23 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
           ]));
         });
 
+        it('should check links via patterns with valid variables', async() => {
+          const opIn = AF.createAlt([
+            assignOperationSource(AF.createLink(DF.namedNode('p1')), source1),
+            assignOperationSource(AF.createLink(DF.namedNode('empty')), source1),
+          ]);
+          await actor.run({ operation: opIn, context: ctx });
+          expect(source1.source.queryBindings).toHaveBeenCalledTimes(2);
+          expect(source1.source.queryBindings).toHaveBeenCalledWith(
+            AF.createPattern(DF.variable('s'), DF.namedNode('p1'), DF.variable('o')),
+            ctx,
+          );
+          expect(source1.source.queryBindings).toHaveBeenCalledWith(
+            AF.createPattern(DF.variable('s'), DF.namedNode('empty'), DF.variable('o')),
+            ctx,
+          );
+        });
+
         it('should not prune for no empty children', async() => {
           const opIn = AF.createAlt([
             assignOperationSource(AF.createLink(DF.namedNode('p1')), source1),
@@ -510,6 +548,42 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
         });
       });
 
+      describe('with from operations', () => {
+        it('should not modify children', async() => {
+          // The graphs of the patterns within a FROM are only rewritten when that FROM is executed,
+          // so their emptiness may not be determined against the source's dataset here.
+          const opIn = AF.createFrom(
+            AF.createUnion([
+              assignOperationSource(AF
+                .createPattern(DF.namedNode('s'), DF.namedNode('p1'), DF.namedNode('o')), source1),
+              assignOperationSource(AF
+                .createPattern(DF.namedNode('s'), DF.namedNode('empty'), DF.namedNode('o')), source1),
+              AF.createAlt([
+                assignOperationSource(AF.createLink(DF.namedNode('p1')), source1),
+                assignOperationSource(AF.createLink(DF.namedNode('empty')), source1),
+              ]),
+            ]),
+            [ DF.namedNode('g1') ],
+            [ DF.namedNode('g2') ],
+          );
+          const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+          expect(opOut).toEqual(AF.createFrom(
+            AF.createUnion([
+              assignOperationSource(AF
+                .createPattern(DF.namedNode('s'), DF.namedNode('p1'), DF.namedNode('o')), source1),
+              assignOperationSource(AF
+                .createPattern(DF.namedNode('s'), DF.namedNode('empty'), DF.namedNode('o')), source1),
+              AF.createAlt([
+                assignOperationSource(AF.createLink(DF.namedNode('p1')), source1),
+                assignOperationSource(AF.createLink(DF.namedNode('empty')), source1),
+              ]),
+            ]),
+            [ DF.namedNode('g1') ],
+            [ DF.namedNode('g2') ],
+          ));
+        });
+      });
+
       describe('with projections', () => {
         it('should prune if the projection now has missing variables in union', async() => {
           const opIn = AF.createProject(
@@ -539,6 +613,51 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
           );
           const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
           expect(opOut).toEqual(AF.createUnion([]));
+        });
+
+        it('should not prune if the projection does not have missing variables in alt', async() => {
+          const opIn = AF.createProject(
+            AF.createAlt([
+              assignOperationSource(AF.createLink(DF.namedNode('nonempty')), source1),
+              AF.createAlt([
+                assignOperationSource(AF.createLink(DF.namedNode('empty')), source1),
+                assignOperationSource(AF.createLink(DF.namedNode('empty')), source1),
+              ]),
+              assignOperationSource(AF.createLink(DF.namedNode('nonempty')), source1),
+            ]),
+            [
+              DF.variable('o'),
+            ],
+          );
+          const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+          expect(opOut).toEqual(AF.createProject(AF.createAlt([
+            assignOperationSource(AF.createLink(DF.namedNode('nonempty')), source1),
+            assignOperationSource(AF.createLink(DF.namedNode('nonempty')), source1),
+          ]), [ DF.variable('o') ]));
+        });
+
+        it('should not prune if the projection now has partial missing variables in alt', async() => {
+          const opIn = AF.createProject(
+            AF.createAlt([
+              assignOperationSource(AF.createLink(DF.namedNode('empty')), source1),
+              assignOperationSource(AF.createLink(DF.namedNode('empty')), source1),
+              assignOperationSource(AF.createLink(DF.namedNode('p1')), source1),
+              assignOperationSource(AF.createLink(DF.namedNode('p2')), source1),
+            ]),
+            [
+              DF.variable('o'),
+            ],
+          );
+          const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+          expect(opOut).toEqual(AF.createProject(
+            AF.createAlt([
+              assignOperationSource(AF.createLink(DF.namedNode('p1')), source1),
+              assignOperationSource(AF.createLink(DF.namedNode('p2')), source1),
+            ]),
+            [
+              DF.variable('o'),
+            ],
+          ));
         });
 
         it('should not prune if the projection has no missing variables', async() => {
@@ -615,9 +734,6 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
               AF.createJoin([
                 assignOperationSource(AF
                   .createPattern(DF.namedNode('s'), DF.namedNode('nonEmpty'), DF.variable('o')), source1),
-              ]),
-              AF.createJoin([
-                AF.createUnion([]),
               ]),
             ]),
             [
@@ -757,6 +873,176 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
             ],
           ));
         });
+
+        describe('depending on the operations around empty ones', () => {
+          const variable = DF.variable('o');
+          const unionOf = (predicate: string): Algebra.Operation => AF.createUnion([
+            assignOperationSource(AF.createPattern(DF.namedNode('s'), DF.namedNode(predicate), variable), source1),
+            assignOperationSource(AF.createPattern(DF.namedNode('s'), DF.namedNode(predicate), variable), source1),
+          ]);
+          const altOf = (predicate: string): Algebra.Operation => AF.createAlt([
+            assignOperationSource(AF.createLink(DF.namedNode(predicate)), source1),
+            assignOperationSource(AF.createLink(DF.namedNode(predicate)), source1),
+          ]);
+          const nonEmptyPattern = (): Algebra.Operation =>
+            assignOperationSource(AF.createPattern(DF.namedNode('s'), DF.namedNode('nonEmpty'), variable), source1);
+          // Becomes the non-empty pattern, so that the operations around it are rewritten while staying non-empty
+          const partlyEmptyUnion = (): Algebra.Operation => AF.createUnion([
+            nonEmptyPattern(),
+            assignOperationSource(AF.createPattern(DF.namedNode('s'), DF.namedNode('empty'), variable), source1),
+          ]);
+          const pathOf = (predicate: Algebra.Operation): Algebra.Operation =>
+            AF.createPath(DF.namedNode('s'), predicate, variable);
+          const count = AF.createBoundAggregate(DF.variable('c'), 'count', AF.createWildcardExpression(), false);
+          const booleanOf = (value: boolean): Algebra.Expression => AF.createTermExpression(DF.literal(
+            String(value),
+            DF.namedNode('http://www.w3.org/2001/XMLSchema#boolean'),
+          ));
+
+          it.each(<[string, () => Algebra.Operation][]> [
+            [ 'join', () => AF.createJoin([ unionOf('nonEmpty'), unionOf('empty') ]) ],
+            [ 'left join with an empty left', () => AF.createLeftJoin(unionOf('empty'), unionOf('nonEmpty')) ],
+            [ 'minus with an empty left', () => AF.createMinus(unionOf('empty'), unionOf('nonEmpty')) ],
+            [ 'filter', () => AF.createFilter(unionOf('empty'), AF.createTermExpression(variable)) ],
+            [ 'extend', () => AF.createExtend(unionOf('empty'), DF.variable('x'), AF.createTermExpression(variable)) ],
+            [ 'project', () => AF.createProject(unionOf('empty'), [ variable ]) ],
+            [ 'distinct', () => AF.createDistinct(unionOf('empty')) ],
+            [ 'reduced', () => AF.createReduced(unionOf('empty')) ],
+            [ 'slice', () => AF.createSlice(unionOf('empty'), 1) ],
+            [ 'order by', () => AF.createOrderBy(unionOf('empty'), [ AF.createTermExpression(variable) ]) ],
+            [ 'graph', () => AF.createGraph(unionOf('empty'), DF.namedNode('g')) ],
+            [ 'group with keys', () => AF.createGroup(unionOf('empty'), [ variable ], [ count ]) ],
+            [ 'one-or-more path', () => pathOf(AF.createOneOrMorePath(altOf('empty'))) ],
+            [ 'inverse path', () => pathOf(AF.createInv(altOf('empty'))) ],
+            [ 'sequence path', () => pathOf(AF.createSeq([ altOf('nonEmpty'), altOf('empty') ])) ],
+          ])('should prune if the projection has an empty %s', async(_, createOperation) => {
+            const { operation: opOut } = await actor
+              .run({ operation: AF.createProject(createOperation(), [ variable ]), context: ctx });
+            expect(opOut).toEqual(AF.createUnion([]));
+          });
+
+          it.each(<[string, () => Algebra.Operation][]> [
+            [ 'filter expression', () => AF.createFilter(
+              unionOf('nonEmpty'),
+              AF.createExistenceExpression(true, unionOf('empty')),
+            ) ],
+            [ 'extend expression', () => AF.createExtend(
+              unionOf('nonEmpty'),
+              DF.variable('x'),
+              AF.createExistenceExpression(true, unionOf('empty')),
+            ) ],
+            [ 'minus right', () => AF.createMinus(unionOf('nonEmpty'), unionOf('empty')) ],
+            [ 'group without keys', () => AF.createGroup(unionOf('empty'), [], [ count ]) ],
+            [ 'values', () => AF.createJoin([ unionOf('nonEmpty'), AF.createValues([], [{}]) ]) ],
+          ])('should not prune if the projection has an empty %s', async(_, createOperation) => {
+            const { operation: opOut } = await actor
+              .run({ operation: AF.createProject(createOperation(), [ variable ]), context: ctx });
+            expect(opOut.type).toBe(Algebra.Types.PROJECT);
+          });
+
+          it.each(<[string, (path: Algebra.Operation) => Algebra.Operation][]> [
+            [ 'zero-or-more', path => AF.createZeroOrMorePath(path) ],
+            [ 'zero-or-one', path => AF.createZeroOrOnePath(path) ],
+          ])('should keep the empty links of a %s path', async(_, createPath) => {
+            const opIn = AF.createProject(pathOf(createPath(altOf('empty'))), [ variable ]);
+            const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+            expect(opOut).toEqual(opIn);
+          });
+
+          it.each(<[string, (path: Algebra.Operation) => Algebra.Operation][]> [
+            [ 'inverse', path => AF.createInv(path) ],
+            [ 'one-or-more', path => AF.createOneOrMorePath(path) ],
+          ])('should keep a non-empty %s path', async(_, createPath) => {
+            const nonEmptyLink = (): Algebra.Operation =>
+              assignOperationSource(AF.createLink(DF.namedNode('nonEmpty')), source1);
+            const opIn = AF.createProject(pathOf(createPath(AF.createAlt([
+              nonEmptyLink(),
+              assignOperationSource(AF.createLink(DF.namedNode('empty')), source1),
+            ]))), [ variable ]);
+            const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+            expect(opOut).toEqual(AF.createProject(pathOf(createPath(nonEmptyLink())), [ variable ]));
+          });
+
+          it('should remove minus operations with empty right operation', async() => {
+            const opIn = AF.createProject(AF.createMinus(unionOf('nonEmpty'), unionOf('empty')), [ variable ]);
+            const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+            expect(opOut).toEqual(AF.createProject(unionOf('nonEmpty'), [ variable ]));
+          });
+
+          it('should keep minus operations with non-empty right operation', async() => {
+            const opIn = AF.createProject(AF.createMinus(unionOf('nonEmpty'), partlyEmptyUnion()), [ variable ]);
+            const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+            expect(opOut).toEqual(AF.createProject(
+              AF.createMinus(unionOf('nonEmpty'), nonEmptyPattern()),
+              [ variable ],
+            ));
+          });
+
+          it.each([ true, false ])('should replace an existence with not %s over an empty operation', async(not) => {
+            const { operation: opOut } = await actor.run({
+              operation: AF.createProject(AF.createFilter(
+                unionOf('nonEmpty'),
+                AF.createOperatorExpression('&&', [
+                  AF.createTermExpression(variable),
+                  AF.createExistenceExpression(not, unionOf('empty')),
+                ]),
+              ), [ variable ]),
+              context: ctx,
+            });
+            expect(opOut).toEqual(AF.createProject(AF.createFilter(
+              unionOf('nonEmpty'),
+              AF.createOperatorExpression('&&', [
+                AF.createTermExpression(variable),
+                booleanOf(not),
+              ]),
+            ), [ variable ]));
+          });
+
+          it('should keep an existence over a non-empty operation', async() => {
+            const opIn = AF.createProject(AF.createExtend(
+              unionOf('nonEmpty'),
+              DF.variable('x'),
+              AF.createExistenceExpression(true, AF.createJoin([ unionOf('nonEmpty'), partlyEmptyUnion() ])),
+            ), [ variable ]);
+            const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+            expect(opOut).toEqual(AF.createProject(AF.createExtend(
+              unionOf('nonEmpty'),
+              DF.variable('x'),
+              AF.createExistenceExpression(true, AF.createJoin([ unionOf('nonEmpty'), nonEmptyPattern() ])),
+            ), [ variable ]));
+          });
+
+          it('should remove children of unions that have become empty', async() => {
+            const opIn = AF.createProject(AF.createUnion([
+              AF.createJoin([ unionOf('nonEmpty'), unionOf('empty') ]),
+              unionOf('nonEmpty'),
+              unionOf('nonEmpty'),
+            ]), [ variable ]);
+            const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+            expect(opOut).toEqual(AF.createProject(AF.createUnion([
+              unionOf('nonEmpty'),
+              unionOf('nonEmpty'),
+            ]), [ variable ]));
+          });
+
+          it('should replace the empty operation of a group without keys', async() => {
+            const opIn = AF.createProject(
+              AF.createGroup(AF.createJoin([ unionOf('nonEmpty'), unionOf('empty') ]), [], [ count ]),
+              [ variable ],
+            );
+            const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+            expect(opOut).toEqual(AF.createProject(
+              AF.createGroup(AF.createValues([], []), [], [ count ]),
+              [ variable ],
+            ));
+          });
+
+          it('should keep the non-empty operation of a group without keys', async() => {
+            const opIn = AF.createProject(AF.createGroup(partlyEmptyUnion(), [], [ count ]), [ variable ]);
+            const { operation: opOut } = await actor.run({ operation: opIn, context: ctx });
+            expect(opOut).toEqual(AF.createProject(AF.createGroup(nonEmptyPattern(), [], [ count ]), [ variable ]));
+          });
+        });
       });
     });
 
@@ -787,6 +1073,30 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
           expect(sourceAsk.source.queryBoolean).toHaveBeenCalledTimes(1);
         });
 
+        it('should not verify cardinality estimates via ASK if source does not support it', async() => {
+          sourceAsk.source.queryBindings = () => {
+            const bindingsStream = new ArrayIterator<RDF.Bindings>([], { autoStart: false });
+            bindingsStream.setProperty('metadata', { cardinality: { type: 'estimate', value: 1 }});
+            return bindingsStream;
+          };
+          sourceAsk.source.getSelectorShape = async() => ({
+            type: 'operation',
+            operation: {
+              operationType: 'pattern',
+              pattern: AF.createPattern(
+                DF.variable('s'),
+                DF.variable('p'),
+                DF.variable('o'),
+                DF.variable('g'),
+              ),
+            },
+          });
+          jest.spyOn(sourceAsk.source, 'queryBoolean').mockResolvedValueOnce(false);
+          expect(sourceAsk.source.queryBoolean).not.toHaveBeenCalled();
+          await expect(actor.hasSourceResults(AF, sourceAsk, AF.createNop(), ctx)).resolves.toBeTruthy();
+          expect(sourceAsk.source.queryBoolean).not.toHaveBeenCalled();
+        });
+
         it('should reject for an erroring query', async() => {
           source1.source.queryBindings = () => {
             const bindingsStream = new ArrayIterator<RDF.Bindings>([], { autoStart: false });
@@ -813,6 +1123,16 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
 
         it('should be true for 0 cardinality on source with traversal enabled', async() => {
           source1.context = new ActionContext().set(KeysQuerySourceIdentify.traverse, true);
+          source1.source.queryBindings = () => {
+            const bindingsStream = new ArrayIterator<RDF.Bindings>([], { autoStart: false });
+            bindingsStream.setProperty('metadata', { cardinality: { type: 'exact', value: 0 }});
+            return bindingsStream;
+          };
+          await expect(actor.hasSourceResults(AF, source1, AF.createNop(), ctx)).resolves.toBeTruthy();
+        });
+
+        it('should be true for 0 cardinality on the target of a SERVICE SILENT clause', async() => {
+          source1.context = new ActionContext().set(KeysQueryOperation.silent, true);
           source1.source.queryBindings = () => {
             const bindingsStream = new ArrayIterator<RDF.Bindings>([], { autoStart: false });
             bindingsStream.setProperty('metadata', { cardinality: { type: 'exact', value: 0 }});
@@ -854,7 +1174,88 @@ describe('ActorOptimizeQueryOperationPruneEmptySourceOperations', () => {
         it('should wrap the operation in an ask operation', async() => {
           jest.spyOn(sourceAsk.source, 'queryBoolean').mockImplementation(async() => true);
           await actor.hasSourceResults(AF, sourceAsk, AF.createNop(), ctx);
+          expect(sourceAsk.source.queryBoolean)
+            .toHaveBeenCalledWith(AF.createAsk(AF.createNop()), contextWithAbortSignal(ctx));
+        });
+
+        it('should assume results if the ASK query fails without timeout', async() => {
+          actor = new ActorOptimizeQueryOperationPruneEmptySourceOperations({
+            name: 'actor',
+            bus,
+            useAskIfSupported: true,
+            askTimeout: 0,
+          });
+          jest.spyOn(sourceAsk.source, 'queryBoolean').mockRejectedValue(new Error('ASK error'));
+          await expect(actor.hasSourceResults(AF, sourceAsk, AF.createNop(), ctx)).resolves.toBeTruthy();
+        });
+
+        it('should pass the ASK query context as-is if the timeout is disabled', async() => {
+          actor = new ActorOptimizeQueryOperationPruneEmptySourceOperations({
+            name: 'actor',
+            bus,
+            useAskIfSupported: true,
+            askTimeout: 0,
+          });
+          jest.spyOn(sourceAsk.source, 'queryBoolean').mockImplementation(async() => false);
+          await expect(actor.hasSourceResults(AF, sourceAsk, AF.createNop(), ctx)).resolves.toBeFalsy();
           expect(sourceAsk.source.queryBoolean).toHaveBeenCalledWith(AF.createAsk(AF.createNop()), ctx);
+        });
+
+        it('should combine an existing abort signal with the ASK abort signal', async() => {
+          const existingAbortController = new AbortController();
+          const ctxSignal = ctx.set(KeysHttp.httpAbortSignal, existingAbortController.signal);
+          let signal: AbortSignal | undefined;
+          jest.spyOn(sourceAsk.source, 'queryBoolean').mockImplementation(async(_op, context) => {
+            signal = context.get(KeysHttp.httpAbortSignal);
+            return true;
+          });
+          await actor.hasSourceResults(AF, sourceAsk, AF.createNop(), ctxSignal);
+          expect(signal).not.toBe(existingAbortController.signal);
+          existingAbortController.abort();
+          expect(signal!.aborted).toBeTruthy();
+        });
+
+        describe('with a slow ASK query', () => {
+          let signal: AbortSignal | undefined;
+          let rejectAsk: (error: Error) => void;
+
+          beforeEach(() => {
+            jest.useFakeTimers();
+            actor = new ActorOptimizeQueryOperationPruneEmptySourceOperations({
+              name: 'actor',
+              bus,
+              useAskIfSupported: true,
+              askTimeout: 1000,
+            });
+            jest.spyOn(sourceAsk.source, 'queryBoolean').mockImplementation((_op, context) => {
+              signal = context.get(KeysHttp.httpAbortSignal);
+              return new Promise((_resolve, reject) => {
+                rejectAsk = reject;
+              });
+            });
+          });
+
+          afterEach(() => {
+            jest.useRealTimers();
+          });
+
+          it('should assume results and abort the request on timeout', async() => {
+            const promise = actor.hasSourceResults(AF, sourceAsk, AF.createNop(), ctx);
+            await jest.advanceTimersByTimeAsync(999);
+            expect(signal!.aborted).toBeFalsy();
+            await jest.advanceTimersByTimeAsync(1);
+            await expect(promise).resolves.toBeTruthy();
+            expect(signal!.aborted).toBeTruthy();
+            rejectAsk(new Error('aborted'));
+          });
+
+          it('should assume results if the ASK query fails before the timeout', async() => {
+            const promise = actor.hasSourceResults(AF, sourceAsk, AF.createNop(), ctx);
+            await jest.advanceTimersByTimeAsync(10);
+            rejectAsk(new Error('ASK error'));
+            await expect(promise).resolves.toBeTruthy();
+            expect(jest.getTimerCount()).toBe(0);
+          });
         });
 
         it('should fallback to queryBindings if the source does not accept ask', async() => {

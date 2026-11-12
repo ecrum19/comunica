@@ -1,5 +1,7 @@
-import type { FragmentSelectorShape } from '@comunica/types';
-import { Algebra, Util } from 'sparqlalgebrajs';
+import { KeysInitQuery, KeysRdfUpdateQuads } from '@comunica/context-entries';
+import type { FragmentSelectorShape, IActionContext, IDataDestination, IQuerySourceWrapper } from '@comunica/types';
+import { Algebra, algebraUtils, isKnownSubType, TypesComunica } from '@comunica/utils-algebra';
+import { getDataDestinationValue, getServiceExecutorLookup } from './Utils';
 
 /**
  * Check if the given shape accepts the given query operation.
@@ -8,35 +10,102 @@ import { Algebra, Util } from 'sparqlalgebrajs';
  * @param options Additional options to consider.
  * @param options.joinBindings If additional bindings will be pushed down to the source for joining.
  * @param options.filterBindings If additional bindings will be pushed down to the source for filtering.
+ * @param options.synchronous If the operation will be passed to the source's `queryBindingsSynchronous`.
  */
 export function doesShapeAcceptOperation(
   shape: FragmentSelectorShape,
   operation: Algebra.Operation,
   options?: FragmentSelectorShapeTestFlags,
 ): boolean {
-  return doesShapeAcceptOperationRecurseShape(shape, shape, operation, options);
+  // Cache for doesShapeAcceptOperationRecurseOperation results, keyed by operation object identity.
+  // This avoids exponential blowup when a disjunction shape has multiple children: each failing
+  // shape child would otherwise redundantly re-traverse the entire operation subtree.
+  const operationRecurseCache = new Map<Algebra.Operation, boolean>();
+  return doesShapeAcceptOperationRecurseShape(shape, shape, operation, operationRecurseCache, options);
+}
+
+/**
+ * Check if the given shape accepts the given query operation, pushing down extension functions as the context demands.
+ * @param shape A shape to test the query operation against.
+ * @param operation A query operation to test.
+ * @param context The action context, holding the extensionFunctionsAlwaysPushdown setting.
+ * @param options Additional options to consider.
+ * @return If the shape accepts the operation.
+ */
+export function doesShapeAcceptOperationInContext(
+  shape: FragmentSelectorShape,
+  operation: Algebra.Operation,
+  context: IActionContext,
+  options?: Omit<FragmentSelectorShapeTestFlags, 'wildcardAcceptAllExtensionFunctions'>,
+): boolean {
+  return doesShapeAcceptOperation(shape, operation, {
+    ...options,
+    wildcardAcceptAllExtensionFunctions: context.get(KeysInitQuery.extensionFunctionsAlwaysPushdown),
+  });
+}
+
+/**
+ * Remove a flag from the given shape and all of its nested shapes.
+ * @param shape A selector shape.
+ * @param flag The flag to remove.
+ * @return The shape without the flag, which is the given shape if it has none.
+ */
+export function removeShapeFlag(
+  shape: FragmentSelectorShape,
+  flag: 'joinBindings' | 'filterBindings' | 'synchronous',
+): FragmentSelectorShape {
+  switch (shape.type) {
+    case 'operation': {
+      const children = shape.children?.map(child => removeShapeFlag(child, flag));
+      if (!shape[flag] && (!children || children.every((child, i) => child === shape.children![i]))) {
+        return shape;
+      }
+      const { [flag]: _flag, ...rest } = shape;
+      return children ? { ...rest, children } : rest;
+    }
+    case 'conjunction':
+    case 'disjunction': {
+      const children = shape.children.map(child => removeShapeFlag(child, flag));
+      return children.every((child, i) => child === shape.children[i]) ? shape : { ...shape, children };
+    }
+    case 'negation':
+    case 'arity': {
+      const child = removeShapeFlag(shape.child, flag);
+      return child === shape.child ? shape : { ...shape, child };
+    }
+  }
 }
 
 function doesShapeAcceptOperationRecurseShape(
   shapeTop: FragmentSelectorShape,
   shapeActive: FragmentSelectorShape,
   operation: Algebra.Operation,
+  operationRecurseCache: Map<Algebra.Operation, boolean>,
   options?: FragmentSelectorShapeTestFlags,
 ): boolean {
   // Recurse into the shape
   if (shapeActive.type === 'conjunction') {
     return shapeActive.children
-      .every(child => doesShapeAcceptOperationRecurseShape(shapeTop, child, operation, options));
+      .every(child => doesShapeAcceptOperationRecurseShape(shapeTop, child, operation, operationRecurseCache, options));
   }
   if (shapeActive.type === 'disjunction') {
     return shapeActive.children
-      .some(child => doesShapeAcceptOperationRecurseShape(shapeTop, child, operation, options));
+      .some(child => doesShapeAcceptOperationRecurseShape(shapeTop, child, operation, operationRecurseCache, options));
   }
   if (shapeActive.type === 'negation') {
-    return !doesShapeAcceptOperationRecurseShape(shapeActive.child, shapeActive.child, operation, options);
+    // The negation changes shapeTop, so we must use a fresh cache to avoid mixing results
+    // from different shapeTop scopes.
+    const negationCache = new Map<Algebra.Operation, boolean>();
+    return !doesShapeAcceptOperationRecurseShape(
+      shapeActive.child,
+      shapeActive.child,
+      operation,
+      negationCache,
+      options,
+    );
   }
   if (shapeActive.type === 'arity') {
-    return doesShapeAcceptOperationRecurseShape(shapeTop, shapeActive.child, operation, options);
+    return doesShapeAcceptOperationRecurseShape(shapeTop, shapeActive.child, operation, operationRecurseCache, options);
   }
 
   // Validate options
@@ -44,32 +113,50 @@ function doesShapeAcceptOperationRecurseShape(
     (options?.filterBindings && !shapeActive.filterBindings)) {
     return false;
   }
+  if (options?.synchronous && !shapeActive.synchronous) {
+    return false;
+  }
 
   // Check if the shape's operation matches with the given operation
   const shapeOperation = shapeActive.operation;
   switch (shapeOperation.operationType) {
     case 'type': {
-      if (shapeOperation.type === Algebra.types.EXPRESSION && isExtensionFunction(operation) &&
+      if (shapeOperation.type === Algebra.Types.EXPRESSION && isExtensionFunction(operation) &&
         !('extensionFunctions' in shapeOperation &&
         shapeOperation.extensionFunctions?.includes(operation.name.value))) {
         return false;
       }
-      if (!doesShapeAcceptOperationRecurseOperationAndShape(shapeTop, shapeActive.children, operation, options) &&
-        !doesShapeAcceptOperationRecurseOperation(shapeTop, operation, options)) {
+      if (!doesShapeAcceptOperationRecurseOperationAndShape(
+        shapeTop,
+        shapeActive.children,
+        operation,
+        operationRecurseCache,
+        options,
+      ) &&
+        !doesShapeAcceptOperationRecurseOperation(shapeTop, operation, operationRecurseCache, options)) {
         return false;
       }
       return shapeOperation.type === operation.type;
     }
     case 'pattern': {
-      if (doesShapeAcceptOperationRecurseOperationAndShape(shapeTop, shapeActive.children, operation, options) &&
-        !doesShapeAcceptOperationRecurseOperation(shapeTop, operation, options)) {
+      if (!doesShapeAcceptOperationRecurseOperationAndShape(
+        shapeTop,
+        shapeActive.children,
+        operation,
+        operationRecurseCache,
+        options,
+      ) &&
+        !doesShapeAcceptOperationRecurseOperation(shapeTop, operation, operationRecurseCache, options)) {
         return false;
       }
       return shapeOperation.pattern.type === operation.type;
     }
     case 'wildcard': {
       // All possible operations are accepted by this shape.
-      // As exception, extension functions are not accepted through wildcards.
+      // As exception, Comunica's internal operations and extension functions are not accepted through wildcards.
+      if (isInternalOperation(operation)) {
+        return false;
+      }
       if (options?.wildcardAcceptAllExtensionFunctions) {
         return true;
       }
@@ -79,13 +166,15 @@ function doesShapeAcceptOperationRecurseShape(
       // Also check for nested extension functions,
       // and only accept the wildcard if all nested extension functions are supported by the query shape.
       let hasUnsupportedExtensionFunction = false;
-      Util.recurseOperation(operation, {
-        [Algebra.types.EXPRESSION](subOp) {
-          if (isExtensionFunction(subOp) && !doesShapeAcceptOperation(shapeTop, subOp, options)) {
-            hasUnsupportedExtensionFunction = true;
-            return false;
-          }
-          return true;
+      algebraUtils.visitOperation(operation, {
+        [Algebra.Types.EXPRESSION]: {
+          visitor: (subOp) => {
+            if (isExtensionFunction(subOp) && !doesShapeAcceptOperation(shapeTop, subOp, options)) {
+              hasUnsupportedExtensionFunction = true;
+              return false;
+            }
+            return true;
+          },
         },
       });
       return !hasUnsupportedExtensionFunction;
@@ -97,56 +186,161 @@ function doesShapeAcceptOperationRecurseOperationAndShape(
   shapeTop: FragmentSelectorShape,
   shapeActiveChildren: FragmentSelectorShape[] | undefined,
   operation: Algebra.Operation,
+  operationRecurseCache: Map<Algebra.Operation, boolean>,
   options?: FragmentSelectorShapeTestFlags,
 ): boolean {
-  if (isExtensionFunction(operation) || isExtensionFunction(operation.expression)) {
+  if (isExtensionFunction(operation) || isExtensionFunction((<any> operation).expression)) {
     return false;
   }
   if (shapeActiveChildren) {
-    const operationInputs: Algebra.Operation[] = operation.input ?
-        (Array.isArray(operation.input) ? operation.input : [ operation.input ]) :
-      operation.patterns ?? [];
+    const operationCast = <Algebra.Operation & { input?: unknown; patterns?: any[] }> operation;
+    const operationInputs: Algebra.Operation[] = operationCast.input ?
+        (Array.isArray(operationCast.input) ? operationCast.input : [ operationCast.input ]) :
+      operationCast.patterns ?? [];
     for (const [ i, shapeActiveChild ] of shapeActiveChildren.entries()) {
       if (!operationInputs[i] ||
-        !doesShapeAcceptOperationRecurseShape(shapeTop, shapeActiveChild, operationInputs[i], options)) {
+        !doesShapeAcceptOperationRecurseShape(
+          shapeTop,
+          shapeActiveChild,
+          operationInputs[i],
+          operationRecurseCache,
+          options,
+        )) {
         return false;
       }
     }
+    return true;
   }
-  return true;
+  return false;
 }
 
 function doesShapeAcceptOperationRecurseOperation(
   shapeTop: FragmentSelectorShape,
   operation: Algebra.Operation,
+  cache: Map<Algebra.Operation, boolean>,
+  options?: FragmentSelectorShapeTestFlags,
+): boolean {
+  // Check the cache first to avoid redundant subtree traversals.
+  // When a shape has multiple disjunction/conjunction children, each failing child would otherwise
+  // re-traverse the entire operation subtree independently, leading to exponential blowup.
+  const cached = cache.get(operation);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const result = doesShapeAcceptOperationRecurseOperationImpl(shapeTop, operation, cache, options);
+  cache.set(operation, result);
+  return result;
+}
+
+function doesShapeAcceptOperationRecurseOperationImpl(
+  shapeTop: FragmentSelectorShape,
+  operation: Algebra.Operation,
+  cache: Map<Algebra.Operation, boolean>,
   options?: FragmentSelectorShapeTestFlags,
 ): boolean {
   // Recurse into the operation, and restart from the top-level shape
-  if (operation.input) {
-    const inputs: Algebra.Operation[] = Array.isArray(operation.input) ? operation.input : [ operation.input ];
-    if (!inputs.every(input => doesShapeAcceptOperationRecurseShape(shapeTop, shapeTop, input, options))) {
+  const operationCast = <Algebra.Operation & { input?: unknown; patterns?: any[]; expression?: any }> operation;
+  if (operationCast.input) {
+    const inputs: Algebra.Operation[] = Array
+      .isArray(operationCast.input) ?
+      operationCast.input :
+        [ operationCast.input ];
+    if (!inputs.every(input => doesShapeAcceptOperationRecurseShape(shapeTop, shapeTop, input, cache, options))) {
       return false;
     }
   }
-  if (operation.expression && isExtensionFunction(operation.expression) &&
-    !doesShapeAcceptOperationRecurseShape(shapeTop, shapeTop, operation.expression, options)) {
+  if (operationCast.expression && isExtensionFunction(operationCast.expression) &&
+      !doesShapeAcceptOperationRecurseShape(shapeTop, shapeTop, operationCast.expression, cache, options)) {
     return false;
   }
-  return !(operation.patterns && !operation.patterns
-    .every((input: Algebra.Pattern) => doesShapeAcceptOperationRecurseShape(shapeTop, shapeTop, input, options)));
+  const patternAccepted = (input: Algebra.Pattern): boolean =>
+    doesShapeAcceptOperationRecurseShape(shapeTop, shapeTop, input, cache, options);
+  return !(operationCast.patterns && !operationCast.patterns.every(patternAccepted));
 }
 
 function isStandardSparqlFunction(iri: string): boolean {
   return /^https?:\/\/www\.w3\.org\//u.test(iri);
 }
 
-function isExtensionFunction(operation: Algebra.Operation): boolean {
-  return operation && operation.type === Algebra.types.EXPRESSION &&
-    operation.expressionType === Algebra.expressionTypes.NAMED && !isStandardSparqlFunction(operation.name.value);
+function isExtensionFunction(operation: Algebra.Operation): operation is Algebra.NamedExpression {
+  return operation && operation.type === Algebra.Types.EXPRESSION &&
+    isKnownSubType(operation, Algebra.ExpressionTypes.NAMED) && !isStandardSparqlFunction(operation.name.value);
+}
+
+const internalOperationTypes = new Set<string>(Object.values(TypesComunica));
+
+function isInternalOperation(operation: Algebra.Operation): boolean {
+  return internalOperationTypes.has(operation.type);
 }
 
 export type FragmentSelectorShapeTestFlags = {
   joinBindings?: boolean;
   filterBindings?: boolean;
+  synchronous?: boolean;
   wildcardAcceptAllExtensionFunctions?: boolean;
 };
+
+/**
+ * Get the selector shape of a query source, in the context of that source.
+ * The source's own context must be included, as it may change how the source is accessed.
+ * @param sourceWrapper A query source with its context.
+ * @param context The action context, which is extended with the source's context.
+ */
+export async function getSourceSelectorShape(
+  sourceWrapper: IQuerySourceWrapper,
+  context: IActionContext,
+): Promise<FragmentSelectorShape> {
+  return sourceWrapper.source.getSelectorShape(sourceWrapper.context ? context.merge(sourceWrapper.context) : context);
+}
+
+export async function passFullOperationToSource(
+  operation: Algebra.Operation,
+  sources: IQuerySourceWrapper[],
+  context: IActionContext,
+): Promise<boolean> {
+  const lookupServiceExecutor = getServiceExecutorLookup(context);
+  if (sources.length === 1 && !hasServiceExecutorClause(operation, lookupServiceExecutor)) {
+    const sourceWrapper = sources[0];
+    const destination: IDataDestination | undefined = context.get(KeysRdfUpdateQuads.destination);
+    if (!destination || sourceWrapper.source.referenceValue === getDataDestinationValue(destination)) {
+      try {
+        const shape = await getSourceSelectorShape(sourceWrapper, context);
+        if (doesShapeAcceptOperationInContext(shape, operation, context)) {
+          return true;
+        }
+      } catch {
+        // Fallback to the default case when the selector shape does not exist,
+        // which can occur for a non-existent destination.
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if the given operation contains a SERVICE clause of which the target has a custom SERVICE executor.
+ * @param operation An operation.
+ * @param lookupServiceExecutor A lookup function for custom SERVICE executors, or undefined if none are registered.
+ */
+function hasServiceExecutorClause(
+  operation: Algebra.Operation,
+  lookupServiceExecutor: ReturnType<typeof getServiceExecutorLookup>,
+): boolean {
+  if (!lookupServiceExecutor) {
+    return false;
+  }
+  let found = false;
+  algebraUtils.visitOperation(operation, {
+    [Algebra.Types.SERVICE]: {
+      preVisitor: (serviceOp) => {
+        if (serviceOp.name.termType === 'NamedNode' && lookupServiceExecutor(serviceOp.name.value) !== undefined) {
+          found = true;
+          return { shortcut: true };
+        }
+        return { continue: false };
+      },
+    },
+  });
+  return found;
+}

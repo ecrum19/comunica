@@ -2,16 +2,16 @@ import { QuerySourceRdfJs } from '@comunica/actor-query-source-identify-rdfjs';
 import type { IActionQuerySourceIdentify, MediatorQuerySourceIdentify } from '@comunica/bus-query-source-identify';
 import type { IActionRdfParseHandle, MediatorRdfParseHandle } from '@comunica/bus-rdf-parse';
 import { ActionContext, Bus } from '@comunica/core';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
-import { Factory } from 'sparqlalgebrajs';
 import { streamifyArray } from 'streamify-array';
 import { ActorQuerySourceIdentifySerialized } from '../lib/ActorQuerySourceIdentifySerialized';
 import '@comunica/utils-jest';
 
 const DF = new DataFactory();
-const AF = new Factory(DF);
+const AF = new AlgebraFactory(DF);
 const BF = new BindingsFactory(DF);
 
 describe('ActorQuerySourceIdentifySerialized', () => {
@@ -144,6 +144,38 @@ describe('ActorQuerySourceIdentifySerialized', () => {
             o: DF.namedNode('ex:o2'),
           }),
         ]);
+      });
+
+      it('should identify the parsed data by its base IRI', async() => {
+        jest.spyOn(mediatorRdfParse, 'mediate');
+        await actor.run({
+          querySourceUnidentified: {
+            type: 'serialized',
+            value: sourceValue,
+            mediaType: sourceMediaType,
+            baseIRI: sourceBaseIri,
+          },
+          context: new ActionContext(),
+        });
+        expect(mediatorRdfParse.mediate).toHaveBeenCalledWith(expect.objectContaining({
+          handle: expect.objectContaining({ url: 'a serialized source with base IRI http://example.org/' }),
+          handleMediaType: sourceMediaType,
+        }));
+      });
+
+      it('should identify the parsed data without base IRI', async() => {
+        jest.spyOn(mediatorRdfParse, 'mediate');
+        await actor.run({
+          querySourceUnidentified: {
+            type: 'serialized',
+            value: sourceValue,
+            mediaType: sourceMediaType,
+          },
+          context: new ActionContext(),
+        });
+        expect(mediatorRdfParse.mediate).toHaveBeenCalledWith(expect.objectContaining({
+          handle: expect.objectContaining({ url: 'a serialized source' }),
+        }));
       });
     });
   });

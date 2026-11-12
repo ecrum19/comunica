@@ -1,15 +1,16 @@
 import type { EventEmitter } from 'node:stream';
-import { skolemizeQuad } from '@comunica/actor-context-preprocess-query-source-skolemize';
+import { skolemizeQuad } from '@comunica/actor-optimize-query-operation-query-source-skolemize';
 import { KeysInitQuery, KeysQuerySourceIdentify, KeysRdfUpdateQuads } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IActionContext } from '@comunica/types';
+import { getContextDestinationUrl } from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
 import { ArrayIterator } from 'asynciterator';
 import { DataFactory, Store } from 'n3';
 import { DataFactory as RdfDataFactory } from 'rdf-data-factory';
 import '@comunica/utils-jest';
 import type { IActorRdfUpdateQuadsOutput } from '../lib';
-import { ActorRdfUpdateQuadsDestination, getContextDestinationUrl } from '../lib';
+import { ActorRdfUpdateQuadsDestination } from '../lib';
 
 const { quad, namedNode, blankNode } = DataFactory;
 
@@ -73,8 +74,8 @@ describe('ActorRdfUpdateQuadsDestination', () => {
 
     it('should run with streams', async() => {
       await actor.run({
-        quadStreamInsert: new ArrayIterator([]),
-        quadStreamDelete: new ArrayIterator([]),
+        quadStreamInsert: new ArrayIterator([], { autoStart: false }),
+        quadStreamDelete: new ArrayIterator([], { autoStart: false }),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       }).then(async(output: any) => {
         await expect(output.execute()).resolves.toBeUndefined();
@@ -160,6 +161,92 @@ describe('ActorRdfUpdateQuadsDestination', () => {
       await output.execute();
 
       expect(store.getQuads(null, null, null, null)).toEqual([ q1 ]);
+    });
+  });
+
+  describe('An ActorRdfUpdateQuadsDestination instance with a wrapped rdfjs destination', () => {
+    const actor = new (<any> ActorRdfUpdateQuadsDestination)({ name: 'actor', bus });
+    actor.getDestination = (context: any) => Promise.resolve(
+      new RdfJsQuadDestination(context.get(KeysRdfUpdateQuads.destination).value),
+    );
+
+    it('should deskolemize quads for a destination wrapped in an IDataDestination object', async() => {
+      const q = quad(blankNode('i'), namedNode('http://example.org#type'), namedNode('http://example.org#thing'));
+
+      const store = new Store();
+      const context: IActionContext = new ActionContext({
+        [KeysInitQuery.dataFactory.name]: DF,
+        [KeysRdfUpdateQuads.destination.name]: { type: 'rdfjsStore', value: store },
+        // Source ids are keyed by the source's reference value, which is the store itself
+        [KeysQuerySourceIdentify.sourceIds.name]: new Map([[ store, '1' ]]),
+      });
+
+      const output: IActorRdfUpdateQuadsOutput = await actor.run({
+        quadStreamInsert: new ArrayIterator([
+          skolemizeQuad(DF, q, '1'),
+        ], { autoStart: false }),
+        quadStreamDelete: new ArrayIterator([], { autoStart: false }),
+        context,
+      });
+
+      await output.execute();
+
+      expect(store.getQuads(null, null, null, null)).toEqual([ q ]);
+    });
+
+    it('should not deskolemize quads when the destination has no source id', async() => {
+      const q = quad(blankNode('i'), namedNode('http://example.org#type'), namedNode('http://example.org#thing'));
+      const skolemized = quad(
+        blankNode('bc_1_i'),
+        namedNode('http://example.org#type'),
+        namedNode('http://example.org#thing'),
+      );
+
+      const store = new Store();
+      const context: IActionContext = new ActionContext({
+        [KeysInitQuery.dataFactory.name]: DF,
+        [KeysRdfUpdateQuads.destination.name]: { type: 'rdfjsStore', value: store },
+      });
+
+      const output: IActorRdfUpdateQuadsOutput = await actor.run({
+        quadStreamInsert: new ArrayIterator([
+          skolemizeQuad(DF, q, '1'),
+        ], { autoStart: false }),
+        quadStreamDelete: new ArrayIterator([], { autoStart: false }),
+        context,
+      });
+
+      await output.execute();
+
+      expect(store.getQuads(null, null, null, null)).toEqual([ skolemized ]);
+    });
+
+    it('should not deskolemize quads for a wrapped destination of a different source', async() => {
+      const q = quad(blankNode('i'), namedNode('http://example.org#type'), namedNode('http://example.org#thing'));
+      const skolemized = quad(
+        blankNode('bc_1_i'),
+        namedNode('http://example.org#type'),
+        namedNode('http://example.org#thing'),
+      );
+
+      const store = new Store();
+      const context: IActionContext = new ActionContext({
+        [KeysInitQuery.dataFactory.name]: DF,
+        [KeysRdfUpdateQuads.destination.name]: { type: 'rdfjsStore', value: store },
+        [KeysQuerySourceIdentify.sourceIds.name]: new Map([[ store, '2' ]]),
+      });
+
+      const output: IActorRdfUpdateQuadsOutput = await actor.run({
+        quadStreamInsert: new ArrayIterator([
+          skolemizeQuad(DF, q, '1'),
+        ], { autoStart: false }),
+        quadStreamDelete: new ArrayIterator([], { autoStart: false }),
+        context,
+      });
+
+      await output.execute();
+
+      expect(store.getQuads(null, null, null, null)).toEqual([ skolemized ]);
     });
   });
 });

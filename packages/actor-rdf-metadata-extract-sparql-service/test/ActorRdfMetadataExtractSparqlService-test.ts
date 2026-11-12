@@ -28,6 +28,34 @@ describe('ActorRdfMetadataExtractSparqlService', () => {
     });
   });
 
+  describe('isLocalUrl', () => {
+    beforeEach(() => {
+      actor = new ActorRdfMetadataExtractSparqlService({ name: 'actor', bus, inferHttpsEndpoint: false });
+    });
+
+    it.each([
+      'http://localhost/sparql',
+      'http://sub.localhost:3000/sparql',
+      'https://0.0.0.0:8080/x-query',
+      'http://127.0.0.1/sparql',
+      'http://127.1.2.3/sparql',
+      'http://[::]/sparql',
+      'http://[::1]:8080/sparql',
+    ])('should be true for %s', (url) => {
+      expect(actor.isLocalUrl(url)).toBe(true);
+    });
+
+    it.each([
+      'https://example.org/sparql',
+      'https://localhost.example.org/sparql',
+      'http://127.0.0.1.example.org/sparql',
+      'http://10.0.0.1/sparql',
+      'not a url',
+    ])('should be false for %s', (url) => {
+      expect(actor.isLocalUrl(url)).toBe(false);
+    });
+  });
+
   describe('run', () => {
     const voidSubset = DF.namedNode('http://rdfs.org/ns/void#subset');
 
@@ -39,13 +67,23 @@ describe('ActorRdfMetadataExtractSparqlService', () => {
 
     const sparqlResultsJson = DF.namedNode('http://www.w3.org/ns/formats/SPARQL_Results_JSON');
     const sparqlResultsXml = DF.namedNode('http://www.w3.org/ns/formats/SPARQL_Results_XML');
+    const sparql10Query = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}SPARQL10Query`);
     const sparql11Query = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}SPARQL11Query`);
+    const sparqlQuery = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}SPARQLQuery`);
+    const sparqlVersion10 = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SPARQL}version-1.0`);
+    const sparqlVersion11 = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SPARQL}version-1.1`);
+    const sparqlVersion12 = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SPARQL}version-1.2`);
+    const sparqlVersion12Basic = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SPARQL}version-1.2-basic`);
+
+    const propertyFeature = DF.namedNode('ex:propertyFeatureExample');
 
     const serviceDescriptionFeature = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}feature`);
     const serviceDescriptionEndpoint = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}endpoint`);
     const serviceDescriptionInputFormat = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}inputFormat`);
     const serviceDescriptionResultFormat = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}resultFormat`);
+    const serviceDescriptionPropertyFeature = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}propertyFeature`);
     const serviceDescriptionSupportedLanguage = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}supportedLanguage`);
+    const serviceDescriptionSupportedVersion = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}supportedVersion`);
     const serviceDescriptionDefaultDataset = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}defaultDataset`);
     const serviceDescriptionDefaultGraph = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}defaultGraph`);
     const serviceDescriptionBasicFederatedQuery = DF.namedNode(`${ActorRdfMetadataExtractSparqlService.SD}BasicFederatedQuery`);
@@ -64,7 +102,9 @@ describe('ActorRdfMetadataExtractSparqlService', () => {
         DF.quad(serviceDescriptionIri, serviceDescriptionEndpoint, endpointService),
         DF.quad(serviceDescriptionIri, serviceDescriptionFeature, serviceDescriptionBasicFederatedQuery),
         DF.quad(serviceDescriptionIri, serviceDescriptionFeature, serviceDescriptionUnionDefaultGraph),
+        DF.quad(serviceDescriptionIri, serviceDescriptionFeature, DF.namedNode('unknown')),
         DF.quad(serviceDescriptionIri, serviceDescriptionSupportedLanguage, sparql11Query),
+        DF.quad(serviceDescriptionIri, serviceDescriptionPropertyFeature, propertyFeature),
         DF.quad(serviceDescriptionIri, serviceDescriptionInputFormat, sparqlResultsJson),
         DF.quad(serviceDescriptionIri, serviceDescriptionResultFormat, sparqlResultsXml),
         DF.quad(serviceDescriptionIri, serviceDescriptionDefaultDataset, endpointDefaultDataset),
@@ -80,8 +120,43 @@ describe('ActorRdfMetadataExtractSparqlService', () => {
           defaultGraph: endpointDefaultGraph.value,
           inputFormats: [ sparqlResultsJson.value ],
           resultFormats: [ sparqlResultsXml.value ],
-          supportedLanguages: [ sparql11Query.value ],
+          supportedLanguages: [ sparql11Query.value, sparqlQuery.value ],
+          supportedVersions: [ sparqlVersion11.value ],
           extensionFunctions: [ endpointExtensionFunction.value ],
+          propertyFeatures: [ propertyFeature.value ],
+        },
+      });
+    });
+
+    it('should derive language and version metadata in a backward-compatible way', async() => {
+      const input = streamifyArray([
+        DF.quad(endpointIri, serviceDescriptionSupportedLanguage, sparql10Query),
+        DF.quad(endpointIri, serviceDescriptionSupportedVersion, sparqlVersion10),
+        DF.quad(endpointIri, serviceDescriptionSupportedVersion, sparqlVersion11),
+        DF.quad(endpointIri, serviceDescriptionSupportedVersion, sparqlVersion12),
+        DF.quad(endpointIri, serviceDescriptionSupportedVersion, sparqlVersion12Basic),
+      ]);
+      await expect(actor.run({ url: endpointIri.value, metadata: input, context, requestTime })).resolves.toEqual({
+        metadata: {
+          supportedLanguages: [ sparql10Query.value, sparqlQuery.value, sparql11Query.value ],
+          supportedVersions: [
+            sparqlVersion10.value,
+            sparqlVersion11.value,
+            sparqlVersion12.value,
+            sparqlVersion12Basic.value,
+          ],
+        },
+      });
+    });
+
+    it('should expose unknown supported versions without adding legacy language aliases', async() => {
+      const unknownVersion = DF.namedNode('http://example.org/unknown-version');
+      const input = streamifyArray([
+        DF.quad(endpointIri, serviceDescriptionSupportedVersion, unknownVersion),
+      ]);
+      await expect(actor.run({ url: endpointIri.value, metadata: input, context, requestTime })).resolves.toEqual({
+        metadata: {
+          supportedVersions: [ unknownVersion.value ],
         },
       });
     });
@@ -115,6 +190,32 @@ describe('ActorRdfMetadataExtractSparqlService', () => {
       await expect(actor.run({ url: httpsIri, metadata: input, context, requestTime })).resolves.toEqual({
         metadata: { sparqlService: endpointService.value.replace(/^http:/u, 'https:') },
       });
+    });
+
+    it('should replace a local sd:endpoint by the requested URL for non-local sources, and warn', async() => {
+      const logWarn = jest.spyOn(<any> actor, 'logWarn');
+      const url = 'https://example.org/query';
+      const input = streamifyArray([
+        DF.quad(DF.blankNode(), serviceDescriptionEndpoint, DF.namedNode('https://0.0.0.0:8080/x-query')),
+      ]);
+      await expect(actor.run({ url, metadata: input, context, requestTime })).resolves.toEqual({
+        metadata: { sparqlService: url },
+      });
+      expect(logWarn).toHaveBeenCalledWith(
+        context,
+        'Invalid metadata detected in https://example.org/query: the SPARQL service description refers to the local endpoint https://0.0.0.0:8080/x-query. This has been corrected to https://example.org/query, but the server should be reconfigured with a valid sd:endpoint.',
+      );
+    });
+
+    it('should keep a local sd:endpoint for local sources', async() => {
+      const logWarn = jest.spyOn(<any> actor, 'logWarn');
+      const input = streamifyArray([
+        DF.quad(DF.blankNode(), serviceDescriptionEndpoint, DF.namedNode('http://127.0.0.1:8080/x-query')),
+      ]);
+      await expect(actor.run({ url: endpointIri.value, metadata: input, context, requestTime })).resolves.toEqual({
+        metadata: { sparqlService: 'http://127.0.0.1:8080/x-query' },
+      });
+      expect(logWarn).not.toHaveBeenCalled();
     });
 
     it('should parse sd:endpoint, sd:defaultDataset and the correct sd:defaultGraph when available', async() => {

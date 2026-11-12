@@ -28,6 +28,7 @@ export class ActorRdfJoinNone extends ActorRdfJoin {
       physicalName: 'none',
       limitEntries: 0,
     });
+    this.mediatorMergeBindingsContext = args.mediatorMergeBindingsContext;
   }
 
   public override async test(
@@ -37,7 +38,7 @@ export class ActorRdfJoinNone extends ActorRdfJoin {
     if (action.entries.length > 0) {
       return failTest(`Actor ${this.name} can only join zero entries`);
     }
-    return await this.getJoinCoefficients(action, undefined!);
+    return await this.getJoinCoefficients(action, { metadatas: []});
   }
 
   protected async getOutput(action: IActionRdfJoin): Promise<IActorRdfJoinOutputInner> {

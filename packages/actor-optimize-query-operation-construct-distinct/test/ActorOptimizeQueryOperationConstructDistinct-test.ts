@@ -1,13 +1,13 @@
-import { KeysInitQuery } from '@comunica/context-entries/lib/Keys';
+import { KeysInitQuery } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IActionContext } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import { DataFactory } from 'rdf-data-factory';
-import { Factory } from 'sparqlalgebrajs';
 import { ActorOptimizeQueryOperationConstructDistinct } from '../lib/ActorOptimizeQueryOperationConstructDistinct';
 import '@comunica/utils-jest';
 
 const DF = new DataFactory();
-const factory = new Factory();
+const factory = new AlgebraFactory();
 
 describe('ActorOptimizeQueryOperationConstructDistinct', () => {
   let bus: any;
@@ -23,6 +23,18 @@ describe('ActorOptimizeQueryOperationConstructDistinct', () => {
     beforeEach(() => {
       actor = new ActorOptimizeQueryOperationConstructDistinct({ name: 'actor', bus });
       context = new ActionContext().set(KeysInitQuery.distinctConstruct, true);
+    });
+
+    it('should not change operations without CONSTRUCT operations', async() => {
+      const algebraFactory = new AlgebraFactory();
+      const operation = algebraFactory.createProject(
+        algebraFactory.createPattern(DF.variable('s'), DF.namedNode('p'), DF.variable('o')),
+        [ DF.variable('s') ],
+      );
+      const action = { operation, context: new ActionContext() };
+      const result = await actor.run(action);
+      expect(result.operation).toBe(operation);
+      expect(result.context).toBe(action.context);
     });
 
     it('should throw when distinctConstruct key is not present', async() => {

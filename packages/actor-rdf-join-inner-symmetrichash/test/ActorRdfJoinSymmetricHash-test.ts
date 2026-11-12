@@ -286,8 +286,10 @@ IActorRdfJoinSelectivityOutput
       await actor.run(action, undefined!).then(async(result: IQueryOperationResultBindings) => {
         await expect((<any> result).metadata()).resolves.toHaveProperty('cardinality', {
           type: 'estimate',
-          value: (await (<any> action.entries[0].output).metadata()).cardinality.value *
-          (await (<any> action.entries[1].output).metadata()).cardinality.value,
+          value: Math.min(
+            (await (<any> action.entries[0].output).metadata()).cardinality.value,
+            (await (<any> action.entries[1].output).metadata()).cardinality.value,
+          ),
         });
 
         await expect(result.bindingsStream.toArray()).resolves.toEqual([]);
@@ -299,7 +301,7 @@ IActorRdfJoinSelectivityOutput
         await expect(output.metadata()).resolves.toEqual({
           state: expect.any(MetadataValidationState),
 
-          cardinality: { type: 'estimate', value: 20 },
+          cardinality: { type: 'estimate', value: 4 },
           variables: [
             { variable: DF.variable('a'), canBeUndef: false },
             { variable: DF.variable('b'), canBeUndef: false },
@@ -320,7 +322,7 @@ IActorRdfJoinSelectivityOutput
           [ DF.variable('a'), DF.literal('a') ],
           [ DF.variable('b'), DF.literal('b') ],
         ]),
-      ]);
+      ], { autoStart: false });
       variables0 = [
         { variable: DF.variable('a'), canBeUndef: false },
         { variable: DF.variable('b'), canBeUndef: false },
@@ -330,7 +332,7 @@ IActorRdfJoinSelectivityOutput
           [ DF.variable('a'), DF.literal('a') ],
           [ DF.variable('c'), DF.literal('c') ],
         ]),
-      ]);
+      ], { autoStart: false });
       variables1 = [
         { variable: DF.variable('a'), canBeUndef: false },
         { variable: DF.variable('c'), canBeUndef: false },
@@ -339,7 +341,7 @@ IActorRdfJoinSelectivityOutput
         await expect(output.metadata()).resolves.toEqual({
           state: expect.any(MetadataValidationState),
 
-          cardinality: { type: 'estimate', value: 20 },
+          cardinality: { type: 'estimate', value: 4 },
           variables: [
             { variable: DF.variable('a'), canBeUndef: false },
             { variable: DF.variable('b'), canBeUndef: false },
@@ -367,7 +369,7 @@ IActorRdfJoinSelectivityOutput
           [ DF.variable('a'), DF.literal('a') ],
           [ DF.variable('b'), DF.literal('b') ],
         ]),
-      ]);
+      ], { autoStart: false });
       variables0 = [
         { variable: DF.variable('a'), canBeUndef: false },
         { variable: DF.variable('b'), canBeUndef: false },
@@ -377,7 +379,7 @@ IActorRdfJoinSelectivityOutput
           [ DF.variable('a'), DF.literal('d') ],
           [ DF.variable('c'), DF.literal('c') ],
         ]),
-      ]);
+      ], { autoStart: false });
       variables1 = [
         { variable: DF.variable('a'), canBeUndef: false },
         { variable: DF.variable('c'), canBeUndef: false },
@@ -386,7 +388,7 @@ IActorRdfJoinSelectivityOutput
         await expect(output.metadata()).resolves.toEqual({
           state: expect.any(MetadataValidationState),
 
-          cardinality: { type: 'estimate', value: 20 },
+          cardinality: { type: 'estimate', value: 4 },
           variables: [
             { variable: DF.variable('a'), canBeUndef: false },
             { variable: DF.variable('b'), canBeUndef: false },
@@ -428,7 +430,7 @@ IActorRdfJoinSelectivityOutput
           [ DF.variable('a'), DF.literal('3') ],
           [ DF.variable('b'), DF.literal('4') ],
         ]),
-      ]);
+      ], { autoStart: false });
       variables0 = [
         { variable: DF.variable('a'), canBeUndef: false },
         { variable: DF.variable('b'), canBeUndef: false },
@@ -458,7 +460,7 @@ IActorRdfJoinSelectivityOutput
           [ DF.variable('a'), DF.literal('0') ],
           [ DF.variable('c'), DF.literal('4') ],
         ]),
-      ]);
+      ], { autoStart: false });
       variables1 = [
         { variable: DF.variable('a'), canBeUndef: false },
         { variable: DF.variable('c'), canBeUndef: false },
@@ -509,7 +511,7 @@ IActorRdfJoinSelectivityOutput
         await expect(output.metadata()).resolves.toEqual({
           state: expect.any(MetadataValidationState),
 
-          cardinality: { type: 'estimate', value: 20 },
+          cardinality: { type: 'estimate', value: 4 },
           variables: [
             { variable: DF.variable('a'), canBeUndef: false },
             { variable: DF.variable('b'), canBeUndef: false },

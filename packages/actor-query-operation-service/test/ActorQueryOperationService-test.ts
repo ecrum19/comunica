@@ -1,242 +1,302 @@
-import type { IActionHttpInvalidate } from '@comunica/bus-http-invalidate';
-import { ActorQueryOperation } from '@comunica/bus-query-operation';
-import { KeysInitQuery } from '@comunica/context-entries';
+import type { IActionQueryOperation } from '@comunica/bus-query-operation';
+import { KeysDereference, KeysHttp, KeysInitQuery, KeysQueryOperation } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
+import type { IActionContext, IQuerySourceWrapper } from '@comunica/types';
+import { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
-import { getSafeBindings } from '@comunica/utils-query-operation';
+import { getOperationSource, getSafeBindings } from '@comunica/utils-query-operation';
 import { ArrayIterator } from 'asynciterator';
-import type { LRUCache } from 'lru-cache';
 import { DataFactory } from 'rdf-data-factory';
 import { ActorQueryOperationService } from '../lib/ActorQueryOperationService';
 import '@comunica/utils-jest';
 
 const DF = new DataFactory();
+const AF = new AlgebraFactory(DF);
 const BF = new BindingsFactory(DF);
-const mediatorMergeBindingsContext: any = {
-  mediate: () => ({}),
-};
+
+const mediatorMergeBindingsContext: any = { mediate: () => ({}) };
+const endpoint = DF.namedNode('http://ex.org/sparql');
+
+function pattern(): Algebra.Operation {
+  return AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('x'));
+}
+
+function extensionFunctionFilter(): Algebra.Filter {
+  return AF.createFilter(pattern(), AF.createNamedExpression(DF.namedNode('ex:f'), []));
+}
 
 describe('ActorQueryOperationService', () => {
   let bus: any;
-  let httpInvalidator: any;
   let mediatorQueryOperation: any;
   let mediatorQuerySourceIdentify: any;
-  let invalidateListeners: ((event: IActionHttpInvalidate) => void)[];
+  let querySource: IQuerySourceWrapper;
+  let wildcardShape: boolean;
 
   beforeEach(() => {
     bus = new Bus({ name: 'bus' });
-    mediatorQueryOperation = {
-      mediate: (arg: any) => arg.operation.type === 'error' ?
-        Promise.reject(new Error('Endpoint error')) :
-        Promise.resolve({
-          bindingsStream: new ArrayIterator([
-            BF.bindings([[ DF.variable('a'), DF.literal('1') ]]),
-            BF.bindings([[ DF.variable('a'), DF.literal('2') ]]),
-            BF.bindings([[ DF.variable('a'), DF.literal('3') ]]),
-          ]),
-          metadata: () => Promise.resolve({
-            cardinality: 3,
-            variables: [
-              { variable: DF.variable('a'), canBeUndef: false },
-            ],
-          }),
-          operated: arg,
-          type: 'bindings',
-        }),
+    wildcardShape = true;
+    querySource = <any> {
+      source: {
+        referenceValue: 'http://ex.org/sparql',
+        getSelectorShape: () => Promise.resolve(wildcardShape ?
+            { type: 'operation', operation: { operationType: 'wildcard' }} :
+            { type: 'operation', operation: { operationType: 'type', type: Algebra.Types.PATTERN }}),
+      },
     };
-    mediatorQuerySourceIdentify = {
-      mediate: jest.fn((arg: any) => ({
-        querySource: {
-          value: 'QUERY_SOURCE_WRAPPER',
-          type: arg.querySourceUnidentified.type,
-        },
+    mediatorQuerySourceIdentify = { mediate: jest.fn(() => Promise.resolve({ querySource })) };
+    mediatorQueryOperation = {
+      mediate: jest.fn((action: any) => Promise.resolve({
+        type: 'bindings',
+        bindingsStream: new ArrayIterator([
+          BF.bindings([[ DF.variable('x'), DF.literal('1') ]]),
+        ], { autoStart: false }),
+        metadata: () => Promise.resolve({
+          cardinality: { type: 'exact', value: 1 },
+          variables: [{ variable: DF.variable('x'), canBeUndef: false }],
+        }),
+        operated: action,
       })),
     };
-    invalidateListeners = [];
-    httpInvalidator = {
-      addInvalidateListener: jest.fn(listener => invalidateListeners.push(listener)),
-    };
   });
 
-  describe('The ActorQueryOperationService module', () => {
-    it('should be a function', () => {
-      expect(ActorQueryOperationService).toBeInstanceOf(Function);
+  function createActor(forceSparqlEndpoint = false): ActorQueryOperationService {
+    return new ActorQueryOperationService({
+      name: 'actor',
+      bus,
+      forceSparqlEndpoint,
+      mediatorQueryOperation,
+      mediatorQuerySourceIdentify,
+      mediatorMergeBindingsContext,
+    });
+  }
+
+  function context(): IActionContext {
+    return new ActionContext({ [KeysInitQuery.dataFactory.name]: DF })
+      .set(KeysInitQuery.serviceAllowVariableTargets, true);
+  }
+
+  describe('testOperation', () => {
+    it('should test on a variable target', async() => {
+      const op: any = { operation: AF.createService(pattern(), DF.variable('endpoint')), context: context() };
+      await expect(createActor().test(op)).resolves.toPassTestVoid();
     });
 
-    it('should be a ActorQueryOperationService constructor', () => {
-      expect(new (<any> ActorQueryOperationService)({ name: 'actor', bus, mediatorQueryOperation }))
-        .toBeInstanceOf(ActorQueryOperationService);
-      expect(new (<any> ActorQueryOperationService)({ name: 'actor', bus, mediatorQueryOperation }))
-        .toBeInstanceOf(ActorQueryOperation);
+    it('should test on an IRI target', async() => {
+      const op: any = { operation: AF.createService(pattern(), endpoint), context: context() };
+      await expect(createActor().test(op)).resolves.toPassTestVoid();
     });
 
-    it('should not be able to create new ActorQueryOperationService objects without \'new\'', () => {
-      expect(() => {
-        (<any> ActorQueryOperationService)();
-      }).toThrow(`Class constructor ActorQueryOperationService cannot be invoked without 'new'`);
+    it('should not test on a literal target', async() => {
+      const op: any = {
+        operation: { type: Algebra.Types.SERVICE, name: DF.literal('abc'), input: AF.createNop() },
+        context: context(),
+      };
+      await expect(createActor().test(op)).resolves
+        .toFailTest(`actor can only query services by IRI or variable, while a Literal was given.`);
+    });
+
+    it('should not test on a non-service operation', async() => {
+      const op: any = { operation: AF.createNop(), context: context() };
+      await expect(createActor().test(op)).resolves
+        .toFailTest(`Actor actor only supports service operations, but got nop`);
     });
   });
 
-  describe('An ActorQueryOperationService instance', () => {
-    let actor: ActorQueryOperationService;
-    const forceSparqlEndpoint = true;
+  describe('runOperation with a variable target that is not allowed', () => {
+    function disallowingContext(): IActionContext {
+      return new ActionContext({ [KeysInitQuery.dataFactory.name]: DF });
+    }
 
-    beforeEach(() => {
-      actor = new ActorQueryOperationService({
-        name: 'actor',
-        bus,
-        mediatorQueryOperation,
-        forceSparqlEndpoint,
-        mediatorMergeBindingsContext,
-        mediatorQuerySourceIdentify,
-        httpInvalidator,
-        cacheSize: 16,
-      });
+    it('should error by default', async() => {
+      const op: any = {
+        operation: AF.createService(pattern(), DF.variable('endpoint')),
+        context: disallowingContext(),
+      };
+      await expect(createActor().run(op, undefined)).rejects
+        .toThrow('SERVICE clauses with a variable target are not allowed by default');
     });
 
-    it('should test on service', async() => {
+    it('should error by default for a silent clause', async() => {
       const op: any = {
-        operation: { type: 'service', silent: false, name: DF.namedNode('dummy') },
-        context: new ActionContext(),
+        operation: AF.createService(pattern(), DF.variable('endpoint'), true),
+        context: disallowingContext(),
       };
-      await expect(actor.test(op)).resolves.toPassTestVoid();
+      await expect(createActor().run(op, undefined)).rejects
+        .toThrow('SERVICE clauses with a variable target are not allowed by default');
     });
 
-    it('should not test on non-service', async() => {
-      const op: any = {
-        operation: { type: 'some-other-type' },
-        context: new ActionContext(),
-      };
-      await expect(actor.test(op)).resolves.toFailTest(`Actor actor only supports service operations, but got some-other-type`);
-    });
-
-    it('should not test on service with a non-named node name', async() => {
-      const op: any = {
-        operation: { type: 'service', silent: false, name: DF.literal('dummy') },
-        context: new ActionContext(),
-      };
-      await expect(actor.test(op)).resolves.toFailTest(`actor can only query services by IRI, while a Literal was given.`);
-    });
-
-    it('should run', async() => {
-      const op: any = {
-        operation: { type: 'service', silent: false, name: DF.literal('dummy') },
-        context: new ActionContext(),
-      };
-      const output = getSafeBindings(await actor.run(op, undefined));
-      await expect(output.metadata()).resolves
-        .toEqual({ cardinality: 3, variables: [
-          { variable: DF.variable('a'), canBeUndef: false },
-        ]});
+    it('should not affect clauses with an IRI target', async() => {
+      const op: any = { operation: AF.createService(pattern(), endpoint), context: disallowingContext() };
+      const output = getSafeBindings(await createActor().run(op, undefined));
       await expect(output.bindingsStream).toEqualBindingsStream([
-        BF.bindings([[ DF.variable('a'), DF.literal('1') ]]),
-        BF.bindings([[ DF.variable('a'), DF.literal('2') ]]),
-        BF.bindings([[ DF.variable('a'), DF.literal('3') ]]),
-      ]);
-      expect((<any> output).operated.operation.metadata).toEqual({
-        scopedSource: { value: 'QUERY_SOURCE_WRAPPER', type: 'sparql' },
-      });
-    });
-
-    it('should run on a silent operation when the endpoint errors', async() => {
-      const op: any = {
-        operation: { type: 'service', silent: true, name: DF.literal('dummy'), input: { type: 'error' }},
-        context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
-      };
-      const output = getSafeBindings(await actor.run(op, undefined));
-      await expect(output.metadata()).resolves
-        .toMatchObject({ cardinality: { type: 'exact', value: 1 }, variables: []});
-      await expect(output.bindingsStream).toEqualBindingsStream([
-        BF.bindings(),
+        BF.bindings([[ DF.variable('x'), DF.literal('1') ]]),
       ]);
     });
+  });
 
-    it('should not run on a non-silent operation when the endpoint errors', async() => {
-      const op: any = {
-        operation: { type: 'service', silent: false, name: DF.literal('dummy'), input: { type: 'error' }},
-        context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
-      };
-      await expect(actor.run(op, undefined)).rejects.toBeTruthy();
-    });
-
-    it('should run and use undefined source type when forceSparqlEndpoint is disabled', async() => {
-      const op: any = {
-        operation: { type: 'service', silent: false, name: DF.literal('dummy') },
-        context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
-      };
-      const actorThis = new ActorQueryOperationService({
-        bus,
-        forceSparqlEndpoint: false,
-        mediatorQueryOperation,
-        name: 'actor',
-        mediatorMergeBindingsContext,
-        mediatorQuerySourceIdentify,
+  describe('runOperation with a variable target', () => {
+    it('should return a placeholder with the service variable in scope', async() => {
+      const op: any = { operation: AF.createService(pattern(), DF.variable('endpoint')), context: context() };
+      const output = getSafeBindings(await createActor().run(op, undefined));
+      await expect(output.metadata()).resolves.toEqual({
+        state: expect.anything(),
+        cardinality: { type: 'estimate', value: Number.POSITIVE_INFINITY },
+        operationRequired: true,
+        variables: [
+          { variable: DF.variable('s'), canBeUndef: false },
+          { variable: DF.variable('p'), canBeUndef: false },
+          { variable: DF.variable('x'), canBeUndef: false },
+          { variable: DF.variable('endpoint'), canBeUndef: false },
+        ],
       });
-
-      const output = getSafeBindings(await actorThis.run(op, undefined));
-      expect((<any> output).operated.operation.metadata).toEqual({
-        scopedSource: { value: 'QUERY_SOURCE_WRAPPER', type: undefined },
-      });
-      await expect(output.metadata()).resolves
-        .toEqual({ cardinality: 3, variables: [
-          { variable: DF.variable('a'), canBeUndef: false },
-        ]});
-      await expect(output.bindingsStream).toEqualBindingsStream([
-        BF.bindings([[ DF.variable('a'), DF.literal('1') ]]),
-        BF.bindings([[ DF.variable('a'), DF.literal('2') ]]),
-        BF.bindings([[ DF.variable('a'), DF.literal('3') ]]),
-      ]);
-    });
-
-    it('should run and use sparql source type when forceSparqlEndpoint is enabled', async() => {
-      const op: any = {
-        operation: { type: 'service', silent: false, name: DF.literal('dummy') },
-        context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
-      };
-
-      const output = getSafeBindings(await actor.run(op, undefined));
-      expect((<any> output).operated.operation.metadata).toEqual({
-        scopedSource: { value: 'QUERY_SOURCE_WRAPPER', type: 'sparql' },
-      });
-      await expect(output.metadata()).resolves
-        .toEqual({ cardinality: 3, variables: [
-          { variable: DF.variable('a'), canBeUndef: false },
-        ]});
-      await expect(output.bindingsStream).toEqualBindingsStream([
-        BF.bindings([[ DF.variable('a'), DF.literal('1') ]]),
-        BF.bindings([[ DF.variable('a'), DF.literal('2') ]]),
-        BF.bindings([[ DF.variable('a'), DF.literal('3') ]]),
-      ]);
-    });
-
-    it('should store identified sources for later use', async() => {
-      const operation: any = { name: { value: 'ex:source' }};
-      const sourceResult: any = { querySource: 'source' };
-      const context: any = 'context';
-      const resultBindings = { type: 'bindings' };
-      jest.spyOn(mediatorQuerySourceIdentify, 'mediate').mockResolvedValue(sourceResult);
-      jest.spyOn(mediatorQueryOperation, 'mediate').mockResolvedValue(resultBindings);
       expect(mediatorQuerySourceIdentify.mediate).not.toHaveBeenCalled();
-      expect(mediatorQueryOperation.mediate).not.toHaveBeenCalled();
-      await expect(actor.runOperation(operation, context)).resolves.toBe(resultBindings);
-      await expect(actor.runOperation(operation, context)).resolves.toBe(resultBindings);
-      expect(mediatorQuerySourceIdentify.mediate).toHaveBeenCalledTimes(1);
-      expect(mediatorQueryOperation.mediate).toHaveBeenCalledTimes(2);
     });
 
-    it('should clear the cache upon HTTP invalidation event', () => {
-      const cache = <LRUCache<string, any>>(<any>actor).cache;
-      cache.set('s1', {});
-      cache.set('s2', {});
-      expect(cache.size).toBe(2);
-      for (const listener of invalidateListeners) {
-        listener({ context: <any>{}, url: 's2' });
-      }
-      expect(cache.size).toBe(1);
-      for (const listener of invalidateListeners) {
-        listener({ context: <any>{}});
-      }
-      expect(cache.size).toBe(0);
+    it('should error when the placeholder stream is read', async() => {
+      const op: any = { operation: AF.createService(pattern(), DF.variable('endpoint')), context: context() };
+      const output = getSafeBindings(await createActor().run(op, undefined));
+      await expect(output.bindingsStream.toArray()).rejects
+        .toThrow('Tried to evaluate a SERVICE clause with unbound variable ?endpoint');
+    });
+  });
+
+  describe('runOperation with an IRI target', () => {
+    it('should identify the bound target and delegate the body', async() => {
+      const op: any = { operation: AF.createService(pattern(), endpoint), context: context() };
+      const output = getSafeBindings(await createActor().run(op, undefined));
+      await expect(output.bindingsStream).toEqualBindingsStream([
+        BF.bindings([[ DF.variable('x'), DF.literal('1') ]]),
+      ]);
+      expect(mediatorQuerySourceIdentify.mediate).toHaveBeenCalledWith(expect.objectContaining({
+        querySourceUnidentified: expect.objectContaining({ value: 'http://ex.org/sparql', type: undefined }),
+      }));
+      expect(getOperationSource(mediatorQueryOperation.mediate.mock.calls[0][0].operation)).toBe(querySource);
+    });
+
+    it('should force a sparql endpoint if configured', async() => {
+      const op: any = { operation: AF.createService(pattern(), endpoint), context: context() };
+      await createActor(true).run(op, undefined);
+      expect(mediatorQuerySourceIdentify.mediate).toHaveBeenCalledWith(expect.objectContaining({
+        querySourceUnidentified: expect.objectContaining({ type: 'sparql' }),
+      }));
+    });
+
+    it('should block dereferencing local files by default', async() => {
+      const op: any = { operation: AF.createService(pattern(), endpoint), context: context() };
+      await createActor().run(op, undefined);
+      const sourceContext = mediatorQuerySourceIdentify.mediate.mock.calls[0][0].querySourceUnidentified.context;
+      expect(sourceContext.get(KeysDereference.blockFileAccess)).toBe(true);
+    });
+
+    it('should allow dereferencing local files if explicitly enabled', async() => {
+      const allowingContext = context().set(KeysInitQuery.serviceAllowFileTargets, true);
+      const op: any = { operation: AF.createService(pattern(), endpoint), context: allowingContext };
+      await createActor().run(op, undefined);
+      const sourceContext = mediatorQuerySourceIdentify.mediate.mock.calls[0][0].querySourceUnidentified.context;
+      expect(sourceContext.get(KeysDereference.blockFileAccess)).toBeUndefined();
+    });
+
+    it('should not set credentials by default', async() => {
+      const op: any = { operation: AF.createService(pattern(), endpoint), context: context() };
+      await createActor().run(op, undefined);
+      const sourceContext = mediatorQuerySourceIdentify.mediate.mock.calls[0][0].querySourceUnidentified.context;
+      expect(sourceContext.get(KeysHttp.auth)).toBeUndefined();
+    });
+
+    it('should move credentials in the target into the source context', async() => {
+      const op: any = {
+        operation: AF.createService(pattern(), DF.namedNode('http://user:secret@ex.org/sparql')),
+        context: context(),
+      };
+      await createActor().run(op, undefined);
+      const { querySourceUnidentified } = mediatorQuerySourceIdentify.mediate.mock.calls[0][0];
+      expect(querySourceUnidentified.value).toBe('http://ex.org/sparql');
+      expect(querySourceUnidentified.context.get(KeysHttp.auth)).toBe('user:secret');
+      expect(querySourceUnidentified.context.get(KeysDereference.blockFileAccess)).toBe(true);
+    });
+
+    it('should inherit credentials from a source with the same url', async() => {
+      const op: any = {
+        operation: AF.createService(pattern(), endpoint),
+        context: context().set(KeysQueryOperation.querySources, [ <any> {
+          source: { referenceValue: 'http://ex.org/sparql' },
+          context: new ActionContext().set(KeysHttp.auth, 'user:secret'),
+        } ]),
+      };
+      await createActor().run(op, undefined);
+      const sourceContext = mediatorQuerySourceIdentify.mediate.mock.calls[0][0].querySourceUnidentified.context;
+      expect(sourceContext.get(KeysHttp.auth)).toBe('user:secret');
+    });
+
+    it('should mark the source of a silent clause as silent', async() => {
+      const op: any = {
+        operation: AF.createService(pattern(), endpoint, true),
+        context: context(),
+      };
+      await createActor().run(op, undefined);
+      const sourceContext = mediatorQuerySourceIdentify.mediate.mock.calls[0][0].querySourceUnidentified.context;
+      expect(sourceContext.get(KeysQueryOperation.silent)).toBe(true);
+      expect(sourceContext.get(KeysInitQuery.lenient)).toBe(true);
+    });
+
+    it('should not mark the source of a non-silent clause as silent', async() => {
+      const op: any = { operation: AF.createService(pattern(), endpoint), context: context() };
+      await createActor().run(op, undefined);
+      const sourceContext = mediatorQuerySourceIdentify.mediate.mock.calls[0][0].querySourceUnidentified.context;
+      expect(sourceContext.get(KeysQueryOperation.silent)).toBeUndefined();
+    });
+
+    it('should only annotate leaves if the source does not accept the whole operation', async() => {
+      wildcardShape = false;
+      const join = AF.createJoin([ pattern(), pattern() ]);
+      const op: any = { operation: AF.createService(join, endpoint), context: context() };
+      await createActor().run(op, undefined);
+      const operated = mediatorQueryOperation.mediate.mock.calls[0][0].operation;
+      expect(getOperationSource(operated)).toBeUndefined();
+      expect(getOperationSource(operated.input[0])).toBe(querySource);
+      expect(getOperationSource(operated.input[1])).toBe(querySource);
+    });
+
+    it('should only annotate leaves if the whole operation has an extension function', async() => {
+      const op: IActionQueryOperation = {
+        operation: AF.createService(extensionFunctionFilter(), endpoint),
+        context: context(),
+      };
+      await createActor().run(op, undefined);
+      const operated: Algebra.Filter = mediatorQueryOperation.mediate.mock.calls[0][0].operation;
+      expect(getOperationSource(operated)).toBeUndefined();
+      expect(getOperationSource(operated.input)).toBe(querySource);
+    });
+
+    it('should annotate the whole operation with an extension function if it is pushed down', async() => {
+      const op: IActionQueryOperation = {
+        operation: AF.createService(extensionFunctionFilter(), endpoint),
+        context: context().set(KeysInitQuery.extensionFunctionsAlwaysPushdown, true),
+      };
+      await createActor().run(op, undefined);
+      const operated: Algebra.Filter = mediatorQueryOperation.mediate.mock.calls[0][0].operation;
+      expect(getOperationSource(operated)).toBe(querySource);
+    });
+
+    it('should propagate errors for non-silent clauses', async() => {
+      mediatorQueryOperation.mediate = () => Promise.reject(new Error('Endpoint down'));
+      const op: any = { operation: AF.createService(pattern(), endpoint), context: context() };
+      await expect(createActor().run(op, undefined)).rejects.toThrow('Endpoint down');
+    });
+
+    it('should emit a single empty solution for silent clauses that fail', async() => {
+      mediatorQueryOperation.mediate = () => Promise.reject(new Error('Endpoint down'));
+      const op: any = {
+        operation: AF.createService(pattern(), endpoint, true),
+        context: context(),
+      };
+      const output = getSafeBindings(await createActor().run(op, undefined));
+      await expect(output.metadata()).resolves.toEqual({
+        state: expect.anything(),
+        cardinality: { type: 'exact', value: 1 },
+        variables: [],
+      });
+      await expect(output.bindingsStream).toEqualBindingsStream([ BF.bindings() ]);
     });
   });
 });

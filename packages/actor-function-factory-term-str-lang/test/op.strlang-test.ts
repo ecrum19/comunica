@@ -1,0 +1,19 @@
+import {
+  runFuncTestTable,
+  Notation,
+} from '@comunica/utils-jest';
+import { ActorFunctionFactoryTermStrLang } from '../lib';
+
+describe('like \'strlang\' receiving', () => {
+  runFuncTestTable({
+    registeredActors: [
+      args => new ActorFunctionFactoryTermStrLang(args),
+    ],
+    arity: 2,
+    notation: Notation.Function,
+    operation: 'strlang',
+    errorTable: `
+    "abc" "" = 'Unable to create language string for empty languages'
+    `,
+  });
+});

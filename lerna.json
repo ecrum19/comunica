@@ -1,5 +1,4 @@
 {
-  "lerna": "2.4.0",
   "command": {
     "publish": {
       "ignoreChanges": [
@@ -13,7 +12,10 @@
         "feature/optimize-sparql-fed",
         "feature/*"
       ],
-      "npmClient": "npm"
+      "npmClient": "npm",
+      "throttle": true,
+      "throttleSize": 1,
+      "throttleDelay": 1
     }
   },
   "packages": [
@@ -21,12 +23,12 @@
     "packages/*",
     "performance/*"
   ],
-  "version": "4.4.1",
+  "version": "5.4.1",
   "loglevel": "success",
   "registry": "https://registry.npmjs.org/",
   "npmClient": "yarn",
   "npmClientArgs": [
     "--pure-lockfile"
   ],
-  "lerna-script-tasks": "./packages/utils-monorepo/lib/depCheck.js"
+  "$schema": "node_modules/lerna/schemas/lerna-schema.json"
 }

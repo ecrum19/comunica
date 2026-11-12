@@ -2,12 +2,13 @@ import { ActionContextKey, CONTEXT_KEY_LOGGER } from '@comunica/core';
 import type {
   AsyncExtensionFunctionCreator,
   Bindings,
+  ExistenceResolver,
   FunctionArgumentsCache,
   IActionContext,
-  IAggregatedStore,
   ICliArgsHandler,
   IDataDestination,
   IPhysicalQueryPlanLogger,
+  IPhysicalQueryPlanNode,
   IProxyHandler,
   IQuerySourceWrapper,
   ISuperTypeProvider,
@@ -19,17 +20,22 @@ import type {
   ComunicaDataFactory,
   IStatisticBase,
   IDiscoverEventData,
+  IServiceExecutor,
+  ServiceExecutorCreator,
   PartialResult,
   ILink,
+  DereferenceFromNamedConflictModeResolver,
+  RdfVariant,
 } from '@comunica/types';
+import type { Algebra } from '@comunica/utils-algebra';
 import type * as RDF from '@rdfjs/types';
 import type { IDocumentLoader } from 'jsonld-context-parser';
-import type { Algebra } from 'sparqlalgebrajs';
 
 /**
  * When adding entries to this file, also add a shortcut for them in the contextKeyShortcuts TSDoc comment in
- * ActorInitQueryBase in @comunica/actor-init-query if it makes sense to use this entry externally.
- * Also, add this shortcut to IQueryContextCommon in @comunica/types.
+ * ActorContextPreprocessConvertShortcuts in @comunica/actor-init-query if it makes sense to use this entry externally.
+ * Also, add this shortcut to IQueryContextCommon in @comunica/types,
+ * and possibly the CliArgsHandlers in @comunica/actor-init-query.
  */
 
 export const KeysCore = {
@@ -82,6 +88,35 @@ export const KeysHttp = {
    * This can be used to, for example, force retries on server-side errors in the 500 range.
    */
   httpRetryStatusCodes: new ActionContextKey<number[]>('@comunica/bus-http:http-retry-status-codes'),
+  /**
+   * Number of retries to make when the response body stream errors mid-read.
+   * Response bodies are buffered per attempt (unless disabled by `httpRetryBodyMaxBytes`)
+   * to avoid emitting partial data to downstream parsers.
+   */
+  httpRetryBodyCount: new ActionContextKey<number>('@comunica/bus-http:http-retry-body-count'),
+  /**
+   * The fallback retry delay in milliseconds between body retries.
+   */
+  httpRetryBodyDelayFallback: new ActionContextKey<number>('@comunica/bus-http:http-retry-body-delay-fallback'),
+  /**
+   * Allow body retries for non-idempotent methods or non-replayable request bodies.
+   */
+  httpRetryBodyAllowUnsafe: new ActionContextKey<boolean>('@comunica/bus-http:http-retry-body-allow-unsafe'),
+  /**
+   * Maximum number of bytes to buffer when retrying response body streams.
+   * When exceeded, body retries are disabled and the response will continue streaming as-is.
+   */
+  httpRetryBodyMaxBytes: new ActionContextKey<number>('@comunica/bus-http:http-retry-body-max-bytes'),
+  /**
+   * An abort signal for aborting pending HTTP requests.
+   */
+  httpAbortSignal: new ActionContextKey<AbortSignal>('@comunica/bus-http:http-abort-controller'),
+  /**
+   * If the HTTP-level cache must be enabled.
+   * When enabled, HTTP responses will be stored within the cache, and/or responses can be read from the cache.
+   * This only will only do something outside a browser environment, as browsers take care of caching internally.
+   */
+  httpCache: new ActionContextKey<boolean>('@comunica/bus-http:httpCache'),
 };
 
 export const KeysHttpWayback = {
@@ -131,8 +166,38 @@ export const KeysInitQuery = {
    */
   lenient: new ActionContextKey<boolean>('@comunica/actor-init-query:lenient'),
   /**
+   * If SERVICE clauses are allowed to target local files.
+   * This is disabled by default, as queries could otherwise read arbitrary local files,
+   * which is problematic when queries originate from untrusted parties.
+   */
+  serviceAllowFileTargets: new ActionContextKey<boolean>('@comunica/actor-init-query:serviceAllowFileTargets'),
+  /**
+   * If SERVICE clauses are allowed to have a variable as target.
+   * This is disabled by default, as the targets are then determined by the queried data,
+   * which would allow queries from untrusted parties to dereference arbitrary sources.
+   */
+  serviceAllowVariableTargets: new ActionContextKey<boolean>(
+    '@comunica/actor-init-query:serviceAllowVariableTargets',
+  ),
+  /**
+   * By default, errors will be emitted if parsers encounter unsupported versions.
+   * Setting this flag to true will silence those checks.
+   * Errors may still be emitted if unsupported grammar is encountered.
+   */
+  parseUnsupportedVersions: new ActionContextKey<boolean>('@comunica/actor-init-query:parseUnsupportedVersions'),
+  /**
    * The original query string.
    */
+  // TODO: next/major - stop sending this queryString as-is to sources, and only rely on the equivalent query string
+  //  that is attached to operations (getOperationEquivalentQueryString in @comunica/utils-query-operation):
+  //  - QuerySourceSparql#getQueryStringAsIs: remove the fallback to this queryString.
+  //  - ActorOptimizeQueryOperationAssignSourcesExhaustive#run: stop deleting this queryString.
+  //  - ActorQueryProcessSequential#parse: stop deleting this queryString after applying initial bindings.
+  //  - ActorOptimizeQueryOperationAssignSourcesExhaustive#run: do not attach this queryString to the operation
+  //    if initial bindings are set, as these change the operation.
+  //  - Actors that change the meaning of an operation with an equivalent query string must drop it,
+  //    as mapOperation copies the operation metadata.
+  //  - Document in the changelog that sources must use getOperationEquivalentQueryString instead of this queryString.
   queryString: new ActionContextKey<string>('@comunica/actor-init-query:queryString'),
   /**
    * The original parsed query.
@@ -149,6 +214,8 @@ export const KeysInitQuery = {
   /**
    * Object to cache function argument overload resolutions.
    * Defaults to an object that is reused across query executions.
+   * Resolutions depend on the `superTypeProvider` they were made under,
+   * so a different super-type provider requires a fresh cache.
    */
   functionArgumentsCache: new ActionContextKey<FunctionArgumentsCache>(
     '@comunica/actor-init-query:functionArgumentsCache',
@@ -193,11 +260,31 @@ export const KeysInitQuery = {
     '@comunica/actor-init-query:extensionFunctionsAlwaysPushdown',
   ),
   /**
+   * Dictionary of custom SERVICE executors.
+   * Key is the IRI of the SERVICE target, and value is the executor implementation.
+   * SERVICE clauses with such a target are evaluated by the executor, instead of by querying the target.
+   *
+   * The callback-based serviceExecutorCreator context entry may be used instead, but not simultaneously.
+   */
+  serviceExecutors: new ActionContextKey<Record<string, IServiceExecutor>>(
+    '@comunica/actor-init-query:serviceExecutors',
+  ),
+  /**
+   * Creator of custom SERVICE executors for a given SERVICE target IRI.
+   * Undefined must be returned for targets that must be queried as regular sources.
+   *
+   * The dictionary-based serviceExecutors context entry may be used instead, but not simultaneously.
+   */
+  serviceExecutorCreator: new ActionContextKey<ServiceExecutorCreator>(
+    '@comunica/actor-init-query:serviceExecutorCreator',
+  ),
+  /**
    * Enables manipulation of the CLI arguments and their processing.
    */
   cliArgsHandlers: new ActionContextKey<ICliArgsHandler[]>('@comunica/actor-init-query:cliArgsHandlers'),
   /**
-   * Explain mode of the query. Can be 'parsed', 'logical', 'physical', or 'physical-json'.
+   * Explain mode of the query. Can be 'parsed', 'logical', 'query', 'physical', 'physical-stats',
+   * or 'physical-json'.
    */
   explain: new ActionContextKey<QueryExplainMode>('@comunica/actor-init-query:explain'),
   /**
@@ -207,10 +294,12 @@ export const KeysInitQuery = {
     '@comunica/actor-init-query:physicalQueryPlanLogger',
   ),
   /**
-   * The current physical operator within the query plan.
-   *              This is used to pass parent-child relationships for invoking the query plan logger.
+   * The current node within the query plan.
+   * This is used to pass parent-child relationships for invoking the query plan logger.
    */
-  physicalQueryPlanNode: new ActionContextKey<any>('@comunica/actor-init-query:physicalQueryPlanNode'),
+  physicalQueryPlanNode: new ActionContextKey<IPhysicalQueryPlanNode>(
+    '@comunica/actor-init-query:physicalQueryPlanNode',
+  ),
   /**
    * A JSON-LD context
    */
@@ -220,6 +309,12 @@ export const KeysInitQuery = {
    */
   invalidateCache: new ActionContextKey<boolean>('@comunica/actor-init-query:invalidateCache'),
   /**
+   * An opaque object that is unique to a single query execution.
+   * Actors can use it as a key into a `WeakMap` to hold state that may be reused within one query execution,
+   * but must never be reused across query executions, such as cached source cardinalities.
+   */
+  queryExecutionScope: new ActionContextKey<object>('@comunica/actor-init-query:queryExecutionScope'),
+  /**
    * The data factory for creating terms and quads.
    */
   dataFactory: new ActionContextKey<ComunicaDataFactory>('@comunica/actor-init-query:dataFactory'),
@@ -227,17 +322,70 @@ export const KeysInitQuery = {
    * A boolean value denoting whether results should be deduplicated or not.
    */
   distinctConstruct: new ActionContextKey<boolean>('@comunica/actor-init-query:distinctConstruct'),
+  /**
+   * If the IRIs within FROM (NAMED) clauses must be dereferenced,
+   * and added as sources to the query. (default: false)
+   */
+  dereferenceFromNamed: new ActionContextKey<boolean>('@comunica/actor-init-query:dereferenceFromNamed'),
+  /**
+   * Resolves, per named graph that a FROM NAMED source already contains of its own,
+   * whether to error (default), rewrite it into the FROM NAMED graph, or keep it as-is.
+   * This only has an effect when `dereferenceFromNamed` is enabled.
+   */
+  dereferenceFromNamedConflictMode: new ActionContextKey<DereferenceFromNamedConflictModeResolver>(
+    '@comunica/actor-init-query:dereferenceFromNamedConflictMode',
+  ),
+  /**
+   * The RDF variant the engine operates in https://www.w3.org/TR/rdf12-concepts/#section-generalizations-of-rdf.
+   * Can be undefined or 'rdf' (default), 'symmetricRdf' (also literals and triple terms as subject),
+   * or 'generalizedRdf' (any term in any position).
+   */
+  rdfVariant: new ActionContextKey<RdfVariant>('@comunica/actor-init-query:rdfVariant'),
 };
 
 export const KeysExpressionEvaluator = {
   extensionFunctionCreator: new ActionContextKey<AsyncExtensionFunctionCreator>(
     '@comunica/utils-expression-evaluator:extensionFunctionCreator',
   ),
+  /**
+   * Discovers the super type of a type unknown to the system.
+   * Changing this between evaluations requires a fresh `functionArgumentsCache`,
+   * as overload resolutions are cached without it.
+   */
   superTypeProvider: new ActionContextKey<ISuperTypeProvider>('@comunica/utils-expression-evaluator:superTypeProvider'),
+  /**
+   * Resolves `EXISTS` and `NOT EXISTS` expressions.
+   * When absent, the expression evaluator falls back to its query operation mediator.
+   */
+  existenceResolver: new ActionContextKey<ExistenceResolver>(
+    '@comunica/utils-expression-evaluator:existenceResolver',
+  ),
   defaultTimeZone: new ActionContextKey<ITimeZoneRepresentation>(
     '@comunica/utils-expression-evaluator:defaultTimeZone',
   ),
   actionContext: new ActionContextKey<IActionContext>('@comunica/utils-expression-evaluator:actionContext'),
+  /**
+   * A boolean denoting the behaviour of comparators (e.g. <, >, <=, >=) when used with non-lexical literal operands.
+   * Non-lexical literal are literals whose value does not belong in the space of it's datatype,
+   * e.g. "not-a-number"^^xsd:int
+   *
+   * true: compares both operands by datatypes first and if they're equal, their string values are compared.
+   * false: throws an error (default).
+   */
+  nonLexicalComparison: new ActionContextKey<boolean>(
+    '@comunica/utils-expression-evaluator:nonLexicalComparison',
+  ),
+  /**
+   * A boolean denoting the behaviour of comparators (e.g. <, >, <=, >=) when used with non-literal and mixed operands.
+   * Such non-literals are IRIs, blank nodes, languageStrings and triple terms.
+   * Their comparison is not required by default in SPARQL.
+   *
+   * true: compares them. (follows the relative ordering of https://www.w3.org/TR/sparql12-query/#modOrderBy)
+   * false: throws an error (default).
+   */
+  fullTermComparison: new ActionContextKey<boolean>(
+    '@comunica/utils-expression-evaluator:fullTermComparison',
+  ),
 };
 
 export const KeysQueryOperation = {
@@ -262,6 +410,12 @@ export const KeysQueryOperation = {
    */
   readOnly: new ActionContextKey<boolean>('@comunica/bus-query-operation:readOnly'),
   /**
+   * Flag on a query source context indicating that this source is the target of a `SERVICE SILENT` clause.
+   * Errors from such a source must be swallowed, and replaced by a single empty solution,
+   * as mandated by SPARQL 1.1 Federated Query.
+   */
+  silent: new ActionContextKey<boolean>('@comunica/bus-query-operation:silent'),
+  /**
    * An internal context entry to mark that a property path with arbitrary length and a distinct key is being processed.
    */
   isPathArbitraryLengthDistinctKey: new ActionContextKey<boolean>(
@@ -279,6 +433,19 @@ export const KeysQueryOperation = {
    * The sources to query over.
    */
   querySources: new ActionContextKey<IQuerySourceWrapper[]>('@comunica/bus-query-operation:querySources'),
+  /**
+   * A mapping of SERVICE targets to sources.
+   */
+  serviceSources: new ActionContextKey<Record<string, IQuerySourceWrapper>>(
+    '@comunica/bus-query-operation:serviceSources',
+  ),
+  /**
+   * If set on a query source's own context, that source's dereferenced quads should have their
+   * graph component rewritten to this term.
+   */
+  sourceAsNamedGraph: new ActionContextKey<RDF.NamedNode>(
+    '@comunica/bus-query-operation:sourceAsNamedGraph',
+  ),
 };
 
 export const KeysRdfParseJsonLd = {
@@ -307,6 +474,15 @@ export const KeysRdfParseHtmlScript = {
   extractAllScripts: new ActionContextKey<boolean>('extractAllScripts'),
 };
 
+export const KeysRdfSerialize = {
+  /**
+   * Prefixes that will be used by RDF serializers.
+   */
+  rdfSerializationPrefixes: new ActionContextKey<Record<string, string>>(
+    '@comunica/bus-rdf-serialize:rdfSerializationPrefixes',
+  ),
+};
+
 export const KeysQuerySourceIdentify = {
   /**
    * A map containing unique IDs for each source
@@ -315,16 +491,19 @@ export const KeysQuerySourceIdentify = {
     '@comunica/bus-query-source-identify:sourceIds',
   ),
   /**
-   * Hypermedia sources mapping to their aggregated store.
-   */
-  hypermediaSourcesAggregatedStores: new ActionContextKey<Map<string, IAggregatedStore>>(
-    '@comunica/bus-query-source-identify:hypermediaSourcesAggregatedStores',
-  ),
-  /**
    * If links may be traversed from this source.
    * This means that sources annotated with this flag are considered incomplete until all links have been traversed.
    */
   traverse: new ActionContextKey<boolean>('@comunica/bus-query-source-identify:traverse'),
+};
+
+export const KeysDereference = {
+  /**
+   * If local files may not be dereferenced within the current scope.
+   * This is for example set when dereferencing SERVICE targets,
+   * to avoid exposing local files to queries from untrusted parties.
+   */
+  blockFileAccess: new ActionContextKey<boolean>('@comunica/bus-dereference:blockFileAccess'),
 };
 
 export const KeysRdfUpdateQuads = {
@@ -368,3 +547,22 @@ export const KeysStatistics = {
     '@comunica/statistic:intermediateResults',
   ),
 };
+
+/**
+ * Context keys that need their values different during source caching.
+ */
+export const CONTEXT_KEYS_QUERY_SOURCE_CACHE: ActionContextKey<any>[] = [
+  // Sources that are exposed under a named graph contain different data than the plain source.
+  KeysQueryOperation.sourceAsNamedGraph,
+  // Sources may not be used by queries that do not have the same credentials, or the same way of sending requests.
+  KeysHttp.auth,
+  KeysHttp.fetch,
+  KeysHttp.includeCredentials,
+  KeysHttpProxy.httpProxyHandler,
+  // Sources that may not read local files (such as SERVICE targets) must not be shared with sources that may.
+  KeysDereference.blockFileAccess,
+  // Sources that are dereferenced at another time contain different data.
+  KeysHttpMemento.datetime,
+  // Sources that do not follow links contain different data than sources that do.
+  KeysQuerySourceIdentify.traverse,
+];

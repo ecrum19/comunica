@@ -28,8 +28,9 @@ export class ActorRdfJoinWrapStream extends ActorRdfJoin {
       limitEntries: 0,
       limitEntriesMin: true,
       canHandleUndefs: true,
-      isLeaf: false,
     });
+    this.mediatorJoin = args.mediatorJoin;
+    this.mediatorIteratorTransform = args.mediatorIteratorTransform;
   }
 
   public override async test(action: IActionRdfJoin):

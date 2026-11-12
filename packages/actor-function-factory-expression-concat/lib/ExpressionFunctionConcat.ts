@@ -7,6 +7,7 @@ import type {
 } from '@comunica/utils-expression-evaluator';
 import {
   declare,
+  dirLangString,
   InvalidArgumentTypes,
   langString,
   SparqlOperator,
@@ -40,7 +41,8 @@ export class ExpressionFunctionConcat extends ExpressionFunctionBase {
         const strings = lits.map(lit => lit.typedValue);
         const joined = strings.join('');
         const lang = ExpressionFunctionConcat.langAllEqual(lits) ? lits[0].language : undefined;
-        return lang ? langString(joined, lang) : string(joined);
+        const dir = ExpressionFunctionConcat.dirAllEqual(lits) ? lits[0].direction : undefined;
+        return lang ? (dir ? dirLangString(joined, lang, dir) : langString(joined, lang)) : string(joined);
       },
     });
   }
@@ -53,5 +55,9 @@ export class ExpressionFunctionConcat extends ExpressionFunctionBase {
 
   private static langAllEqual(lits: Literal<string>[]): boolean {
     return lits.length > 0 && lits.every(lit => lit.language === lits[0].language);
+  }
+
+  private static dirAllEqual(lits: Literal<string>[]): boolean {
+    return lits.length > 0 && lits.every(lit => lit.direction === lits[0].direction);
   }
 }

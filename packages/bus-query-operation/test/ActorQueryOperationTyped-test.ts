@@ -1,7 +1,7 @@
 import { KeysInitQuery, KeysQueryOperation } from '@comunica/context-entries';
 import { ActionContext, Bus, passTest } from '@comunica/core';
-import type { IPhysicalQueryPlanLogger } from '@comunica/types';
-import { ActorQueryOperationTyped } from '..';
+import type { IPhysicalQueryPlanLogger, IPhysicalQueryPlanNode } from '@comunica/types';
+import { ActorQueryOperationTyped, BusQueryOperation } from '..';
 import '@comunica/utils-jest';
 
 describe('ActorQueryOperationTyped', () => {
@@ -30,6 +30,32 @@ describe('ActorQueryOperationTyped', () => {
     });
   });
 
+  describe('when subscribed to a BusQueryOperation', () => {
+    // Regression guard: the operation name must already be set on the actor by the time
+    // `Actor`'s constructor subscribes it to the bus. If it is only assigned after `super(...)`,
+    // every actor is indexed as unidentified, and every action gets published to every actor.
+    it('should only be published to for actions of its own operation type', async() => {
+      const busIndexed = new BusQueryOperation({ name: 'bus-indexed' });
+      const actorOp1 = new (<any> ActorQueryOperationTyped)({ name: 'actor-op1', bus: busIndexed }, 'op1');
+      const actorOp2 = new (<any> ActorQueryOperationTyped)({ name: 'actor-op2', bus: busIndexed }, 'op2');
+      actorOp1.testOperation = () => Promise.resolve(passTest({}));
+      actorOp2.testOperation = () => Promise.resolve(passTest({}));
+
+      const replies = busIndexed.publish(<any> { operation: { type: 'op1' }, context: new ActionContext() });
+      await Promise.all(replies.map(reply => reply.reply));
+
+      expect(replies.map(reply => reply.actor.name)).toEqual([ 'actor-op1' ]);
+    });
+
+    it('should expose its operation name to the bus index', () => {
+      const busIndexed = new BusQueryOperation({ name: 'bus-indexed' });
+      const actor = new (<any> ActorQueryOperationTyped)({ name: 'actor-op1', bus: busIndexed }, 'op1');
+      expect(actor.operationName).toBe('op1');
+      expect((<any> busIndexed).actorsIndex).toHaveProperty('op1', [ actor ]);
+      expect((<any> busIndexed).actorsIndex).not.toHaveProperty('_undefined_');
+    });
+  });
+
   describe('An ActorQueryOperationTyped instance', () => {
     const actor = new (<any> ActorQueryOperationTyped)({ name: 'actor', bus }, 'op');
     actor.testOperation = () => Promise.resolve(passTest({ metadata: {}}));
@@ -53,13 +79,17 @@ describe('ActorQueryOperationTyped', () => {
     });
 
     it('should run and invoke the physicalQueryPlanLogger', async() => {
-      const parentNode = '';
-      const logger: IPhysicalQueryPlanLogger = {
-        logOperation: jest.fn(),
-        toJson: jest.fn(),
-        stashChildren: jest.fn(),
-        unstashChild: jest.fn(),
+      const parentNode: IPhysicalQueryPlanNode = <any> { id: 'parent' };
+      const planNode: IPhysicalQueryPlanNode = {
         appendMetadata: jest.fn(),
+        adoptInput: jest.fn(),
+        setOutput: jest.fn(),
+      };
+      const logger: IPhysicalQueryPlanLogger = {
+        logOperation: jest.fn().mockReturnValue(planNode),
+        finalize: jest.fn(),
+        getNodeForOutput: jest.fn(),
+        toJson: jest.fn(),
       };
       const context = new ActionContext({
         [KeysInitQuery.physicalQueryPlanLogger.name]: logger,
@@ -69,19 +99,18 @@ describe('ActorQueryOperationTyped', () => {
 
       const operation = { type: 'op' };
       const action = { operation, context };
-      await actor.run(action);
+      const output = await actor.run(action);
 
-      expect(logger.logOperation).toHaveBeenCalledWith(
-        'op',
-        undefined,
-        operation,
+      expect(logger.logOperation).toHaveBeenCalledWith({
+        logicalOperator: 'op',
         parentNode,
-        'actor',
-        {},
-      );
+        actor: 'actor',
+        operation,
+      });
+      expect(planNode.setOutput).toHaveBeenCalledWith(output);
       expect(actor.runOperation).toHaveBeenCalledWith(operation, new ActionContext({
         [KeysInitQuery.physicalQueryPlanLogger.name]: logger,
-        [KeysInitQuery.physicalQueryPlanNode.name]: operation,
+        [KeysInitQuery.physicalQueryPlanNode.name]: planNode,
         [KeysQueryOperation.operation.name]: operation,
       }), undefined);
     });

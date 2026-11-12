@@ -9,15 +9,12 @@ import type {
   TermExpression,
   TermType,
 } from '@comunica/types';
-import { ExpressionType,
-} from '@comunica/types';
+import { ExpressionType } from '@comunica/types';
 import type * as RDF from '@rdfjs/types';
 import * as C from '../util/Consts';
-import { TypeAlias, TypeURL } from '../util/Consts';
-
+import { TypeURL } from '../util/Consts';
 import * as Err from '../util/Errors';
 import { serializeDate, serializeDateTime, serializeDuration, serializeTime } from '../util/Serialization';
-import { isSubTypeOf } from '../util/TypeHandling';
 
 export abstract class Term implements TermExpression {
   public expressionType: ExpressionType.Term = ExpressionType.Term;
@@ -128,12 +125,14 @@ export class Literal<T extends ISerializable> extends Term {
    * @param dataType a string representing the datatype. Can be of type @see LiteralTypes or any URI
    * @param strValue the string value of this literal. In other words, the string representing the RDF.literal value.
    * @param language the language, mainly for language enabled strings like RDF_LANG_STRING
+   * @param direction the base direction, mainly for directional language enabled strings like RDF_DIR_LANG_STRING
    */
   public constructor(
     public typedValue: T,
     public dataType: string,
     public strValue?: string,
     public language?: string,
+    public direction?: 'ltr' | 'rtl',
   ) {
     super();
   }
@@ -141,7 +140,9 @@ export class Literal<T extends ISerializable> extends Term {
   public toRDF(dataFactory: ComunicaDataFactory): RDF.Literal {
     return dataFactory.literal(
       this.strValue ?? this.str(),
-      this.language ?? dataFactory.namedNode(this.dataType),
+      this.direction && this.language ?
+          { language: this.language, direction: this.direction } :
+        this.language ?? dataFactory.namedNode(this.dataType),
     );
   }
 
@@ -175,11 +176,16 @@ export abstract class NumericLiteral extends Literal<number> {
   }
 
   public override str(): string {
-    return this.strValue ??
-      this.specificFormatter(this.typedValue);
+    return this.strValue ?? this.specificFormatter(this.typedValue);
   }
 }
 
+/**
+ * Integer datatype from XSD: https://www.w3.org/TR/xmlschema-2/#integer
+ *
+ * The canonical representation consists of a finite-length sequence of decimal digits (#x30-#x39),
+ * with leading + and leading zeroes prohibited.
+ */
 export class IntegerLiteral extends NumericLiteral {
   public constructor(
     public override typedValue: number,
@@ -190,11 +196,20 @@ export class IntegerLiteral extends NumericLiteral {
     super(typedValue, dataType ?? TypeURL.XSD_INTEGER, strValue, language);
   }
 
-  protected specificFormatter(val: number): string {
+  protected override specificFormatter(val: number): string {
+    // Force the number to not be represented as an exponential,
+    // even when large enough for JS to automatically try it.
     return val.toFixed(0);
   }
 }
 
+/**
+ * Decimal datatype from XSD: https://www.w3.org/TR/xmlschema-2/#decimal
+ *
+ * The canonical representation consists of a finite-length sequence of decimal digits (#x30-#x39),
+ * separated by a period as a decimal indicator. Leading + is prohibited. Leading and trailing zeroes
+ * are prohibited, except for the single mandatory digit on both sides of the decimal point.
+ */
 export class DecimalLiteral extends NumericLiteral {
   public constructor(
     public override typedValue: number,
@@ -205,26 +220,33 @@ export class DecimalLiteral extends NumericLiteral {
     super(typedValue, dataType ?? TypeURL.XSD_DECIMAL, strValue, language);
   }
 
-  protected specificFormatter(val: number): string {
-    return val.toString();
+  protected override specificFormatter(val: number): string {
+    let str = val.toString(10);
+
+    // When the number is so small that JavaScript forces exponential representation,
+    // the value must be forced into decimal format, and trailing zeroes must be stripped.
+    // This does not address accuracy issues, but it does ensure the output is a valid decimal.
+    if (str.includes('e')) {
+      str = val.toFixed(20).replace(/([0-9])0*$/u, '$1');
+    }
+
+    // Ensure there is at least one decimal place.
+    if (!str.includes('.')) {
+      str += '.0';
+    }
+
+    return str;
   }
 }
 
-export class FloatLiteral extends NumericLiteral {
-  public constructor(
-    public override typedValue: number,
-    dataType?: string,
-    public override strValue?: string,
-    public override language?: string,
-  ) {
-    super(typedValue, dataType ?? TypeURL.XSD_FLOAT, strValue, language);
-  }
-
-  protected specificFormatter(val: number): string {
-    return val.toString();
-  }
-}
-
+/**
+ * Double datatype from XSD: https://www.w3.org/TR/xmlschema-2/#double
+ *
+ * The canonical representation consists of a decimal mantissa, followed by E, followed by integer exponent.
+ * The mantissa must follow canonical decimal format, and if zero, must be `0.0`.
+ * The exponent must follow canonical integer format, and if zero, must be `0`.
+ * The canonical representation of zero is `0.0E0`.
+ */
 export class DoubleLiteral extends NumericLiteral {
   public constructor(
     public override typedValue: number,
@@ -235,30 +257,50 @@ export class DoubleLiteral extends NumericLiteral {
     super(typedValue, dataType ?? TypeURL.XSD_DOUBLE, strValue, language);
   }
 
-  protected specificFormatter(val: number): string {
-    if (!Number.isFinite(val)) {
-      if (val > 0) {
-        return 'INF';
+  protected override specificFormatter(val: number): string {
+    if (Number.isFinite(val)) {
+      let [ mantissa, exponent ] = val.toExponential().split('e');
+
+      // Remove leading + from the exponent
+      if (exponent.startsWith('+')) {
+        exponent = exponent.replace(/^\+/u, '');
       }
-      if (val < 0) {
-        return '-INF';
+
+      // Make sure the mantissa has a decimal slot
+      if (!mantissa.includes('.')) {
+        mantissa += '.0';
       }
-      return 'NaN';
+
+      return `${mantissa}E${exponent}`;
     }
 
-    const jsExponential = val.toExponential();
-    const [ jsMantisse, jsExponent ] = jsExponential.split('e');
+    if (val < 0) {
+      return '-INF';
+    }
 
-    // Leading + must be removed for integer
-    // https://www.w3.org/TR/xmlschema-2/#integer
-    const exponent = jsExponent.replace(/\+/u, '');
+    if (val > 0) {
+      return 'INF';
+    }
 
-    // SPARQL test suite prefers trailing zero's
-    const mantisse = jsMantisse.includes('.') ?
-      jsMantisse :
-      `${jsMantisse}.0`;
+    return 'NaN';
+  }
+}
 
-    return `${mantisse}E${exponent}`;
+/**
+ * Float datatype from XSD: https://www.w3.org/TR/xmlschema-2/#float
+ *
+ * Every float (32-bit) is stored as double (64-bit) number in JavaScript,
+ * and the canonical representations of the XSD types are identical,
+ * so the formatter implementation is shared through inheritance.
+ */
+export class FloatLiteral extends DoubleLiteral {
+  public constructor(
+    public override typedValue: number,
+    dataType?: string,
+    public override strValue?: string,
+    public override language?: string,
+  ) {
+    super(typedValue, dataType ?? TypeURL.XSD_FLOAT, strValue, language);
   }
 }
 
@@ -278,7 +320,19 @@ export class LangStringLiteral extends Literal<string> {
   }
 
   public override coerceEBV(): boolean {
-    return this.str().length > 0;
+    // Throws in [SPARQL 1.2](https://www.w3.org/TR/sparql12-query/#ebv), and [1.1](https://www.w3.org/TR/sparql11-query/#ebv)
+    return super.coerceEBV();
+  }
+}
+
+export class DirLangStringLiteral extends Literal<string> {
+  public constructor(
+    public override typedValue: string,
+    public override language: string,
+    public override direction: 'ltr' | 'rtl',
+    dataType?: string,
+  ) {
+    super(typedValue, dataType ?? TypeURL.RDF_DIR_LANG_STRING, typedValue, language, direction);
   }
 }
 
@@ -409,13 +463,9 @@ export class NonLexicalLiteral extends Literal<{ toString: () => 'undefined' }> 
   }
 
   public override coerceEBV(): boolean {
-    const isNumericOrBool =
-      isSubTypeOf(this.dataType, TypeURL.XSD_BOOLEAN, this.openWorldType) ||
-      isSubTypeOf(this.dataType, TypeAlias.SPARQL_NUMERIC, this.openWorldType);
-    if (isNumericOrBool) {
-      return false;
-    }
-    throw new Err.EBVCoercionError(this);
+    // Always throws in [SPARQL 1.2](https://www.w3.org/TR/sparql12-query/#ebv),
+    // and sometimes throws in [1.1](https://www.w3.org/TR/sparql11-query/#ebv)
+    return super.coerceEBV();
   }
 
   public override toRDF(dataFactory: ComunicaDataFactory): RDF.Literal {

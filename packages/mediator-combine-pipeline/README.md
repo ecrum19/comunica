@@ -1,6 +1,6 @@
 # Comunica Mediator Sequential
 
-[![npm version](https://badge.fury.io/js/%40comunica%2Fmediator-sequential.svg)](https://www.npmjs.com/package/@comunica/mediator-sequential)
+[![npm version](https://badge.fury.io/js/%40comunica%2Fmediator-combine-pipeline.svg)](https://www.npmjs.com/package/@comunica/mediator-combine-pipeline)
 
 A comunica mediator that goes over all actors in sequence and forwards I/O.
 This requires the action input and the actor output to be of the same type.
@@ -13,7 +13,7 @@ and should only be used by [developers that want to build their own query engine
 ## Install
 
 ```bash
-$ yarn add @comunica/mediator-sequential
+$ yarn add @comunica/mediator-combine-pipeline
 ```
 
 ## Configure
@@ -23,7 +23,7 @@ After installing, this mediator can be instantiated as follows:
 {
   "@context": [
     ...
-    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/mediator-combine-pipeline/^4.0.0/components/context.jsonld"
+    "https://linkedsoftwaredependencies.org/bundles/npm/@comunica/mediator-combine-pipeline/^5.0.0/components/context.jsonld"
   ],
   "actors": [
     ...

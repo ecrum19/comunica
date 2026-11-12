@@ -1,9 +1,21 @@
-import type { FragmentSelectorShape } from '@comunica/types';
+import { KeysInitQuery } from '@comunica/context-entries';
+import { ActionContext } from '@comunica/core';
+import type { FragmentSelectorShape, IQuerySourceWrapper, IServiceExecutor } from '@comunica/types';
+import { Algebra, AlgebraFactory, TypesComunica } from '@comunica/utils-algebra';
 import type * as RDF from '@rdfjs/types';
-import { Algebra, Factory } from 'sparqlalgebrajs';
-import { doesShapeAcceptOperation } from '../lib/FragmentSelectorShapes';
+import { DataFactory } from 'rdf-data-factory';
+import {
+  doesShapeAcceptOperation,
+  doesShapeAcceptOperationInContext,
+  getSourceSelectorShape,
+  passFullOperationToSource,
+  removeShapeFlag,
+} from '../lib/FragmentSelectorShapes';
 
-const AF = new Factory();
+const AF = new AlgebraFactory();
+const DF = new DataFactory();
+const pattern = AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o'));
+const extensionFunctionFilter = AF.createFilter(pattern, AF.createNamedExpression(DF.namedNode('ex:f'), []));
 
 // Shape for QuerySourceSparql
 const SHAPE_SPARQL_1_1: FragmentSelectorShape = {
@@ -23,14 +35,52 @@ const SHAPE_SPARQL_1_1: FragmentSelectorShape = {
       type: 'negation',
       child: {
         type: 'operation',
-        operation: { operationType: 'type', type: Algebra.types.DISTINCT },
+        operation: { operationType: 'type', type: Algebra.Types.DISTINCT },
         children: [
           {
             type: 'operation',
-            operation: { operationType: 'type', type: Algebra.types.CONSTRUCT },
+            operation: { operationType: 'type', type: Algebra.Types.CONSTRUCT },
+            children: [
+              {
+                type: 'operation',
+                operation: { operationType: 'wildcard' },
+                joinBindings: true,
+              },
+            ],
           },
         ],
       },
+    },
+  ],
+};
+
+// Shape for QuerySourceRdfJs (with all disjunctions enabled: indexNodes=true, indexDistinctTerms=true)
+const SHAPE_RDFJS: FragmentSelectorShape = {
+  type: 'disjunction',
+  children: [
+    {
+      type: 'operation',
+      operation: {
+        operationType: 'pattern',
+        pattern: AF.createPattern(
+          AF.dataFactory.variable!('s'),
+          AF.dataFactory.variable!('p'),
+          AF.dataFactory.variable!('o'),
+        ),
+      },
+      variablesOptional: [
+        AF.dataFactory.variable!('s'),
+        AF.dataFactory.variable!('p'),
+        AF.dataFactory.variable!('o'),
+      ],
+    },
+    {
+      type: 'operation',
+      operation: { operationType: 'type', type: TypesComunica.NODES },
+    },
+    {
+      type: 'operation',
+      operation: { operationType: 'type', type: TypesComunica.DISTINCT_TERMS },
     },
   ],
 };
@@ -62,7 +112,7 @@ describe('FragmentSelectorShapes', () => {
         type: 'operation',
         operation: {
           operationType: 'type',
-          type: Algebra.types.NOP,
+          type: Algebra.Types.NOP,
         },
       }, AF.createNop())).toBeTruthy();
     });
@@ -70,11 +120,11 @@ describe('FragmentSelectorShapes', () => {
     it('should not accept equal operations with type type and unequal children', () => {
       expect(doesShapeAcceptOperation({
         type: 'operation',
-        operation: { operationType: 'type', type: Algebra.types.DISTINCT },
+        operation: { operationType: 'type', type: Algebra.Types.DISTINCT },
         children: [
           {
             type: 'operation',
-            operation: { operationType: 'type', type: Algebra.types.CONSTRUCT },
+            operation: { operationType: 'type', type: Algebra.Types.CONSTRUCT },
           },
         ],
       }, AF.createDistinct(AF.createProject(AF.createNop(), [])))).toBeFalsy();
@@ -83,11 +133,18 @@ describe('FragmentSelectorShapes', () => {
     it('should accept equal operations with type type and children', () => {
       expect(doesShapeAcceptOperation({
         type: 'operation',
-        operation: { operationType: 'type', type: Algebra.types.DISTINCT },
+        operation: { operationType: 'type', type: Algebra.Types.DISTINCT },
         children: [
           {
             type: 'operation',
-            operation: { operationType: 'type', type: Algebra.types.CONSTRUCT },
+            operation: { operationType: 'type', type: Algebra.Types.CONSTRUCT },
+            children: [
+              {
+                type: 'operation',
+                operation: { operationType: 'wildcard' },
+                joinBindings: true,
+              },
+            ],
           },
         ],
       }, AF.createDistinct(AF.createConstruct(AF.createNop(), [])))).toBeTruthy();
@@ -108,12 +165,51 @@ describe('FragmentSelectorShapes', () => {
       }, AF.createBgp([]))).toBeTruthy();
     });
 
+    describe('with internal operations', () => {
+      let nodes: Algebra.Nodes;
+      let distinctTerms: Algebra.DistinctTerms;
+
+      beforeAll(() => {
+        nodes = AF.createNodes(AF.dataFactory.defaultGraph(), AF.dataFactory.variable!('s'));
+        distinctTerms = AF.createDistinctTerms([ AF.dataFactory.variable!('s') ], { s: 'subject' });
+      });
+
+      it('should not accept them with type wildcard', () => {
+        const shape: FragmentSelectorShape = {
+          type: 'operation',
+          operation: { operationType: 'wildcard' },
+        };
+        expect(doesShapeAcceptOperation(shape, nodes)).toBeFalsy();
+        expect(doesShapeAcceptOperation(shape, distinctTerms)).toBeFalsy();
+        expect(doesShapeAcceptOperation(shape, nodes, { wildcardAcceptAllExtensionFunctions: true })).toBeFalsy();
+        expect(doesShapeAcceptOperation(SHAPE_SPARQL_1_1, distinctTerms)).toBeFalsy();
+      });
+
+      it('should only accept the ones that are listed next to a wildcard', () => {
+        const shape: FragmentSelectorShape = {
+          type: 'disjunction',
+          children: [
+            {
+              type: 'operation',
+              operation: { operationType: 'wildcard' },
+            },
+            {
+              type: 'operation',
+              operation: { operationType: 'type', type: TypesComunica.NODES },
+            },
+          ],
+        };
+        expect(doesShapeAcceptOperation(shape, nodes)).toBeTruthy();
+        expect(doesShapeAcceptOperation(shape, distinctTerms)).toBeFalsy();
+      });
+    });
+
     it('should not accept unequal operations with type type', () => {
       expect(doesShapeAcceptOperation({
         type: 'operation',
         operation: {
           operationType: 'type',
-          type: Algebra.types.NOP,
+          type: Algebra.Types.NOP,
         },
       }, AF.createUnion([]))).toBeFalsy();
     });
@@ -126,14 +222,14 @@ describe('FragmentSelectorShapes', () => {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.NOP,
+              type: Algebra.Types.NOP,
             },
           },
           {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.NOP,
+              type: Algebra.Types.NOP,
             },
           },
         ],
@@ -148,14 +244,14 @@ describe('FragmentSelectorShapes', () => {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.NOP,
+              type: Algebra.Types.NOP,
             },
           },
           {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.UNION,
+              type: Algebra.Types.UNION,
             },
           },
         ],
@@ -170,14 +266,14 @@ describe('FragmentSelectorShapes', () => {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.NOP,
+              type: Algebra.Types.NOP,
             },
           },
           {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.NOP,
+              type: Algebra.Types.NOP,
             },
           },
         ],
@@ -189,14 +285,14 @@ describe('FragmentSelectorShapes', () => {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.NOP,
+              type: Algebra.Types.NOP,
             },
           },
           {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.UNION,
+              type: Algebra.Types.UNION,
             },
           },
         ],
@@ -211,18 +307,130 @@ describe('FragmentSelectorShapes', () => {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.NOP,
+              type: Algebra.Types.NOP,
             },
           },
           {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.BGP,
+              type: Algebra.Types.BGP,
             },
           },
         ],
       }, AF.createUnion([]))).toBeFalsy();
+    });
+
+    describe('for a large disjunction', () => {
+      const shape: FragmentSelectorShape = {
+        type: 'disjunction',
+        children: [
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.PROJECT },
+          },
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.PATTERN },
+          },
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.SLICE },
+          },
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.BGP },
+          },
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.JOIN },
+          },
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.EXTEND },
+          },
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.UNION },
+          },
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.VALUES },
+          },
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.FILTER },
+          },
+          {
+            type: 'operation',
+            operation: { operationType: 'type', type: Algebra.Types.LEFT_JOIN },
+          },
+        ],
+      };
+
+      it('should not accept property paths', () => {
+        expect(doesShapeAcceptOperation(shape, AF.createPath(
+          <any> undefined,
+          <any> undefined,
+          <any> undefined,
+        ))).toBeFalsy();
+      });
+
+      it('should not accept property paths in a join', () => {
+        expect(doesShapeAcceptOperation(shape, AF.createJoin([
+          AF.createPath(
+            <any> undefined,
+            <any> undefined,
+            <any> undefined,
+          ),
+          AF.createPath(
+            <any> undefined,
+            <any> undefined,
+            <any> undefined,
+          ),
+        ]))).toBeFalsy();
+      });
+
+      it('should not accept property paths in a join in a projection', () => {
+        expect(doesShapeAcceptOperation(shape, AF.createProject(
+          AF.createJoin([
+            AF.createPath(
+              <any> undefined,
+              <any> undefined,
+              <any> undefined,
+            ),
+            AF.createPath(
+              <any> undefined,
+              <any> undefined,
+              <any> undefined,
+            ),
+          ]),
+          [],
+        ))).toBeFalsy();
+      });
+
+      it('should accept property paths', () => {
+        expect(doesShapeAcceptOperation(shape, AF.createPattern(
+          <any> undefined,
+          <any> undefined,
+          <any> undefined,
+        ))).toBeTruthy();
+      });
+
+      it('should accept property paths in a join', () => {
+        expect(doesShapeAcceptOperation(shape, AF.createJoin([
+          AF.createPattern(
+            <any> undefined,
+            <any> undefined,
+            <any> undefined,
+          ),
+          AF.createPattern(
+            <any> undefined,
+            <any> undefined,
+            <any> undefined,
+          ),
+        ]))).toBeTruthy();
+      });
     });
 
     it('should accept valid negation', () => {
@@ -232,7 +440,7 @@ describe('FragmentSelectorShapes', () => {
           type: 'operation',
           operation: {
             operationType: 'type',
-            type: Algebra.types.NOP,
+            type: Algebra.Types.NOP,
           },
         },
       }, AF.createUnion([]))).toBeTruthy();
@@ -241,11 +449,11 @@ describe('FragmentSelectorShapes', () => {
         type: 'negation',
         child: {
           type: 'operation',
-          operation: { operationType: 'type', type: Algebra.types.DISTINCT },
+          operation: { operationType: 'type', type: Algebra.Types.DISTINCT },
           children: [
             {
               type: 'operation',
-              operation: { operationType: 'type', type: Algebra.types.CONSTRUCT },
+              operation: { operationType: 'type', type: Algebra.Types.CONSTRUCT },
             },
           ],
         },
@@ -259,7 +467,7 @@ describe('FragmentSelectorShapes', () => {
           type: 'operation',
           operation: {
             operationType: 'type',
-            type: Algebra.types.NOP,
+            type: Algebra.Types.NOP,
           },
         },
       }, AF.createNop())).toBeFalsy();
@@ -268,11 +476,18 @@ describe('FragmentSelectorShapes', () => {
         type: 'negation',
         child: {
           type: 'operation',
-          operation: { operationType: 'type', type: Algebra.types.DISTINCT },
+          operation: { operationType: 'type', type: Algebra.Types.DISTINCT },
           children: [
             {
               type: 'operation',
-              operation: { operationType: 'type', type: Algebra.types.CONSTRUCT },
+              operation: { operationType: 'type', type: Algebra.Types.CONSTRUCT },
+              children: [
+                {
+                  type: 'operation',
+                  operation: { operationType: 'wildcard' },
+                  joinBindings: true,
+                },
+              ],
             },
           ],
         },
@@ -286,7 +501,7 @@ describe('FragmentSelectorShapes', () => {
           type: 'operation',
           operation: {
             operationType: 'type',
-            type: Algebra.types.NOP,
+            type: Algebra.Types.NOP,
           },
         },
       }, AF.createNop())).toBeTruthy();
@@ -299,7 +514,7 @@ describe('FragmentSelectorShapes', () => {
           type: 'operation',
           operation: {
             operationType: 'type',
-            type: Algebra.types.NOP,
+            type: Algebra.Types.NOP,
           },
         },
       }, AF.createUnion([]))).toBeFalsy();
@@ -311,7 +526,7 @@ describe('FragmentSelectorShapes', () => {
         joinBindings: true,
         operation: {
           operationType: 'type',
-          type: Algebra.types.NOP,
+          type: Algebra.Types.NOP,
         },
       }, AF.createNop(), { joinBindings: true })).toBeTruthy();
     });
@@ -321,7 +536,7 @@ describe('FragmentSelectorShapes', () => {
         type: 'operation',
         operation: {
           operationType: 'type',
-          type: Algebra.types.NOP,
+          type: Algebra.Types.NOP,
         },
       }, AF.createNop(), { joinBindings: true })).toBeFalsy();
     });
@@ -332,7 +547,7 @@ describe('FragmentSelectorShapes', () => {
         filterBindings: true,
         operation: {
           operationType: 'type',
-          type: Algebra.types.NOP,
+          type: Algebra.Types.NOP,
         },
       }, AF.createNop(), { filterBindings: true })).toBeTruthy();
     });
@@ -342,9 +557,30 @@ describe('FragmentSelectorShapes', () => {
         type: 'operation',
         operation: {
           operationType: 'type',
-          type: Algebra.types.NOP,
+          type: Algebra.Types.NOP,
         },
       }, AF.createNop(), { filterBindings: true })).toBeFalsy();
+    });
+
+    it('should accept valid synchronous', () => {
+      expect(doesShapeAcceptOperation({
+        type: 'operation',
+        synchronous: true,
+        operation: {
+          operationType: 'type',
+          type: Algebra.Types.NOP,
+        },
+      }, AF.createNop(), { synchronous: true })).toBeTruthy();
+    });
+
+    it('should not accept invalid synchronous', () => {
+      expect(doesShapeAcceptOperation({
+        type: 'operation',
+        operation: {
+          operationType: 'type',
+          type: Algebra.Types.NOP,
+        },
+      }, AF.createNop(), { synchronous: true })).toBeFalsy();
     });
 
     it('should not accept shapes with unsupported sub-operations', () => {
@@ -352,12 +588,12 @@ describe('FragmentSelectorShapes', () => {
         type: 'operation',
         operation: {
           operationType: 'type',
-          type: Algebra.types.BGP,
+          type: Algebra.Types.BGP,
         },
         children: [
           {
             type: 'operation',
-            operation: { operationType: 'type', type: Algebra.types.NOP },
+            operation: { operationType: 'type', type: Algebra.Types.NOP },
           },
         ],
       }, AF.createBgp([
@@ -368,12 +604,12 @@ describe('FragmentSelectorShapes', () => {
         type: 'operation',
         operation: {
           operationType: 'type',
-          type: Algebra.types.JOIN,
+          type: Algebra.Types.JOIN,
         },
         children: [
           {
             type: 'operation',
-            operation: { operationType: 'type', type: Algebra.types.NOP },
+            operation: { operationType: 'type', type: Algebra.Types.NOP },
           },
         ],
       }, AF.createJoin([
@@ -384,12 +620,12 @@ describe('FragmentSelectorShapes', () => {
         type: 'operation',
         operation: {
           operationType: 'type',
-          type: Algebra.types.FILTER,
+          type: Algebra.Types.FILTER,
         },
         children: [
           {
             type: 'operation',
-            operation: { operationType: 'type', type: Algebra.types.NOP },
+            operation: { operationType: 'type', type: Algebra.Types.NOP },
           },
         ],
       }, AF.createFilter(
@@ -411,14 +647,14 @@ describe('FragmentSelectorShapes', () => {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.BGP,
+              type: Algebra.Types.BGP,
             },
           },
           {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.PATTERN,
+              type: Algebra.Types.PATTERN,
             },
           },
         ],
@@ -434,14 +670,14 @@ describe('FragmentSelectorShapes', () => {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.JOIN,
+              type: Algebra.Types.JOIN,
             },
           },
           {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.PATTERN,
+              type: Algebra.Types.PATTERN,
             },
           },
         ],
@@ -456,14 +692,14 @@ describe('FragmentSelectorShapes', () => {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.FILTER,
+              type: Algebra.Types.FILTER,
             },
           },
           {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.PATTERN,
+              type: Algebra.Types.PATTERN,
             },
           },
         ],
@@ -488,12 +724,7 @@ describe('FragmentSelectorShapes', () => {
       let operationWithextensionFunctionExpression: Algebra.Join;
 
       beforeAll(() => {
-        extensionFunctionExpression = {
-          expressionType: Algebra.expressionTypes.NAMED,
-          name: <RDF.NamedNode> { value: 'mock1' },
-          args: [],
-          type: Algebra.types.EXPRESSION,
-        };
+        extensionFunctionExpression = AF.createNamedExpression(<RDF.NamedNode> { value: 'mock1' }, []);
         operationWithextensionFunctionExpression = AF.createJoin([
           AF.createNop(),
           extensionFunctionExpression,
@@ -505,7 +736,7 @@ describe('FragmentSelectorShapes', () => {
           type: 'operation',
           operation: {
             operationType: 'type',
-            type: Algebra.types.EXPRESSION,
+            type: Algebra.Types.EXPRESSION,
             extensionFunctions: [ 'mock1' ],
           },
           joinBindings: true,
@@ -517,7 +748,7 @@ describe('FragmentSelectorShapes', () => {
           type: 'operation',
           operation: {
             operationType: 'type',
-            type: Algebra.types.EXPRESSION,
+            type: Algebra.Types.EXPRESSION,
             extensionFunctions: [ 'mock2' ],
           },
           joinBindings: true,
@@ -529,7 +760,7 @@ describe('FragmentSelectorShapes', () => {
           type: 'operation',
           operation: {
             operationType: 'type',
-            type: Algebra.types.EXPRESSION,
+            type: Algebra.Types.EXPRESSION,
             extensionFunctions: [ 'mock2' ],
           },
           joinBindings: true,
@@ -544,7 +775,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock2' ],
               },
               joinBindings: true,
@@ -565,7 +796,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock2' ],
               },
               joinBindings: true,
@@ -586,7 +817,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock2' ],
               },
               joinBindings: true,
@@ -607,7 +838,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock2' ],
               },
               joinBindings: true,
@@ -625,7 +856,7 @@ describe('FragmentSelectorShapes', () => {
           type: 'operation',
           operation: {
             operationType: 'type',
-            type: Algebra.types.EXPRESSION,
+            type: Algebra.Types.EXPRESSION,
             extensionFunctions: [ 'mock1' ],
           },
           joinBindings: true,
@@ -648,7 +879,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock1' ],
               },
               joinBindings: true,
@@ -657,13 +888,13 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.FILTER,
+                type: Algebra.Types.FILTER,
               },
             },
           ],
-        }, <Algebra.Filter> {
+        }, <Algebra.Filter> <any> {
           expression: extensionFunctionExpression,
-          type: Algebra.types.FILTER,
+          type: Algebra.Types.FILTER,
         })).toBeTruthy();
       });
 
@@ -676,7 +907,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock2' ],
               },
               joinBindings: true,
@@ -685,13 +916,13 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.FILTER,
+                type: Algebra.Types.FILTER,
               },
             },
           ],
-        }, <Algebra.Filter> {
+        }, <Algebra.Filter> <any> {
           expression: extensionFunctionExpression,
-          type: Algebra.types.FILTER,
+          type: Algebra.Types.FILTER,
         })).toBeFalsy();
       });
 
@@ -704,7 +935,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock1' ],
               },
               joinBindings: true,
@@ -713,7 +944,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock2' ],
               },
               joinBindings: true,
@@ -731,7 +962,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock1' ],
               },
               joinBindings: true,
@@ -740,7 +971,7 @@ describe('FragmentSelectorShapes', () => {
               type: 'operation',
               operation: {
                 operationType: 'type',
-                type: Algebra.types.EXPRESSION,
+                type: Algebra.Types.EXPRESSION,
                 extensionFunctions: [ 'mock2' ],
               },
               joinBindings: true,
@@ -756,13 +987,359 @@ describe('FragmentSelectorShapes', () => {
             type: 'operation',
             operation: {
               operationType: 'type',
-              type: Algebra.types.EXPRESSION,
+              type: Algebra.Types.EXPRESSION,
               extensionFunctions: [ 'mock1' ],
             },
             joinBindings: true,
           },
         }, extensionFunctionExpression)).toBeTruthy();
       });
+    });
+
+    describe('for QuerySourceRdfJs shape (all disjunctions enabled)', () => {
+      it('should not accept a complex CONSTRUCT query', () => {
+        const DF = AF.dataFactory;
+
+        // Variables
+        const vS = DF.variable!('s');
+        const vP = DF.variable!('p');
+        const vO = DF.variable!('o');
+        const vDataset = DF.variable!('dataset');
+        const vPublisher = DF.variable!('publisher');
+        const vLic = DF.variable!('lic');
+        const vLicense = DF.variable!('license');
+        const vFoafType = DF.variable!('foafType');
+        const vPublisherName = DF.variable!('publisher_name');
+        const vN1 = DF.variable!('n1');
+        const vN2 = DF.variable!('n2');
+        const vN3 = DF.variable!('n3');
+        const vCreator = DF.variable!('creator');
+        const vCreatorName = DF.variable!('creator_name');
+        const vAr = DF.variable!('ar');
+        const vAccessRights = DF.variable!('accessRights');
+        const vAp = DF.variable!('ap');
+        const vThemeDefault = DF.variable!('themeDefault');
+        const vUnbound = DF.variable!('unbound');
+
+        // Named nodes (prefixes: dcat, dct, foaf, ex)
+        const RDF_TYPE = DF.namedNode('http://www.w3.org/1999/02/22-rdf-syntax-ns#type');
+        const DCAT_DATASET = DF.namedNode('http://www.w3.org/ns/dcat#Dataset');
+        const DCT_PUBLISHER = DF.namedNode('http://purl.org/dc/terms/publisher');
+        const DCT_LICENSE = DF.namedNode('http://purl.org/dc/terms/license');
+        const FOAF_NAME = DF.namedNode('http://xmlns.com/foaf/0.1/name');
+        const FOAF_NICK = DF.namedNode('http://xmlns.com/foaf/0.1/nick');
+        const DCT_IDENTIFIER = DF.namedNode('http://purl.org/dc/terms/identifier');
+        const DCT_DESCRIPTION = DF.namedNode('http://purl.org/dc/terms/description');
+        const FOAF_ORGANIZATION = DF.namedNode('http://xmlns.com/foaf/0.1/Organization');
+        const FOAF_PERSON = DF.namedNode('http://xmlns.com/foaf/0.1/Person');
+        const DCT_ACCESS_RIGHTS = DF.namedNode('http://purl.org/dc/terms/accessRights');
+        const DCT_ACCRUAL_PERIODICITY = DF.namedNode('http://purl.org/dc/terms/accrualPeriodicity');
+        const EX_PUBLIC = DF.namedNode('http://example.com/public');
+        const EX_THEME = DF.namedNode('http://example.com/theme');
+
+        /**
+         * Algebra for:
+         *   PREFIX dcat: <http://www.w3.org/ns/dcat#>
+         *   PREFIX dct:  <http://purl.org/dc/terms/>
+         *   PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+         *
+         *   CONSTRUCT { ?s ?p ?o } WHERE {
+         *     SELECT * WHERE {
+         *       {
+         *         ?dataset a dcat:Dataset ;
+         *           dct:publisher ?publisher .
+         *
+         *         OPTIONAL { ?dataset dct:license ?lic }
+         *         BIND(COALESCE(?lic, ?unbound) AS ?license)
+         *
+         *         ?publisher a ?foafType ;
+         *           foaf:name ?publisher_name .
+         *         OPTIONAL { ?publisher foaf:nick       ?n1 }
+         *         OPTIONAL { ?publisher dct:identifier  ?n2 }
+         *         OPTIONAL { ?publisher dct:description ?n3 }
+         *
+         *         OPTIONAL {
+         *           ?creator a ?foafType ;
+         *             foaf:name ?creator_name .
+         *         }
+         *
+         *         VALUES ?foafType { foaf:Organization foaf:Person }
+         *
+         *         OPTIONAL { ?dataset dct:accessRights ?ar }
+         *         BIND(COALESCE(?ar, <http://example.com/public>) AS ?accessRights)
+         *         OPTIONAL { ?dataset dct:accrualPeriodicity ?ap }
+         *         BIND(<http://example.com/theme> AS ?themeDefault)
+         *       }
+         *     }
+         *     LIMIT 1
+         *   }
+         */
+
+        // Step 1: ?dataset a dcat:Dataset ; dct:publisher ?publisher .
+        const step1 = AF.createBgp([
+          AF.createPattern(vDataset, RDF_TYPE, DCAT_DATASET),
+          AF.createPattern(vDataset, DCT_PUBLISHER, vPublisher),
+        ]);
+
+        // Step 2: OPTIONAL { ?dataset dct:license ?lic }
+        const step2 = AF.createLeftJoin(
+          step1,
+          AF.createBgp([ AF.createPattern(vDataset, DCT_LICENSE, vLic) ]),
+        );
+
+        // Step 3: BIND(COALESCE(?lic, ?unbound) AS ?license)
+        const step3 = AF.createExtend(
+          step2,
+          vLicense,
+          AF.createOperatorExpression('coalesce', [
+            AF.createTermExpression(vLic),
+            AF.createTermExpression(vUnbound),
+          ]),
+        );
+
+        // Step 4: ?publisher a ?foafType ; foaf:name ?publisher_name .
+        const step4 = AF.createJoin([
+          step3,
+          AF.createBgp([
+            AF.createPattern(vPublisher, RDF_TYPE, vFoafType),
+            AF.createPattern(vPublisher, FOAF_NAME, vPublisherName),
+          ]),
+        ]);
+
+        // Step 5: OPTIONAL { ?publisher foaf:nick ?n1 }
+        const step5 = AF.createLeftJoin(
+          step4,
+          AF.createBgp([ AF.createPattern(vPublisher, FOAF_NICK, vN1) ]),
+        );
+
+        // Step 6: OPTIONAL { ?publisher dct:identifier ?n2 }
+        const step6 = AF.createLeftJoin(
+          step5,
+          AF.createBgp([ AF.createPattern(vPublisher, DCT_IDENTIFIER, vN2) ]),
+        );
+
+        // Step 7: OPTIONAL { ?publisher dct:description ?n3 }
+        const step7 = AF.createLeftJoin(
+          step6,
+          AF.createBgp([ AF.createPattern(vPublisher, DCT_DESCRIPTION, vN3) ]),
+        );
+
+        // Step 8: OPTIONAL { ?creator a ?foafType ; foaf:name ?creator_name . }
+        const step8 = AF.createLeftJoin(
+          step7,
+          AF.createBgp([
+            AF.createPattern(vCreator, RDF_TYPE, vFoafType),
+            AF.createPattern(vCreator, FOAF_NAME, vCreatorName),
+          ]),
+        );
+
+        // Step 9: VALUES ?foafType { foaf:Organization foaf:Person }
+        const step9 = AF.createJoin([
+          step8,
+          AF.createValues(
+            [ vFoafType ],
+            [{ foafType: FOAF_ORGANIZATION }, { foafType: FOAF_PERSON }],
+          ),
+        ]);
+
+        // Step 10: OPTIONAL { ?dataset dct:accessRights ?ar }
+        const step10 = AF.createLeftJoin(
+          step9,
+          AF.createBgp([ AF.createPattern(vDataset, DCT_ACCESS_RIGHTS, vAr) ]),
+        );
+
+        // Step 11: BIND(COALESCE(?ar, <http://example.com/public>) AS ?accessRights)
+        const step11 = AF.createExtend(
+          step10,
+          vAccessRights,
+          AF.createOperatorExpression('coalesce', [
+            AF.createTermExpression(vAr),
+            AF.createTermExpression(EX_PUBLIC),
+          ]),
+        );
+
+        // Step 12: OPTIONAL { ?dataset dct:accrualPeriodicity ?ap }
+        const step12 = AF.createLeftJoin(
+          step11,
+          AF.createBgp([ AF.createPattern(vDataset, DCT_ACCRUAL_PERIODICITY, vAp) ]),
+        );
+
+        // Step 13: BIND(<http://example.com/theme> AS ?themeDefault)
+        const step13 = AF.createExtend(
+          step12,
+          vThemeDefault,
+          AF.createTermExpression(EX_THEME),
+        );
+
+        // SELECT * WHERE { ... } LIMIT 1
+        const innerSelect = AF.createSlice(
+          AF.createProject(step13, [
+            vDataset,
+            vPublisher,
+            vLic,
+            vLicense,
+            vFoafType,
+            vPublisherName,
+            vN1,
+            vN2,
+            vN3,
+            vCreator,
+            vCreatorName,
+            vAr,
+            vAccessRights,
+            vAp,
+            vThemeDefault,
+          ]),
+          0,
+          1,
+        );
+
+        // CONSTRUCT { ?s ?p ?o } WHERE { SELECT * ... LIMIT 1 }
+        const construct = AF.createConstruct(
+          innerSelect,
+          [ AF.createPattern(vS, vP, vO) ],
+        );
+
+        expect(doesShapeAcceptOperation(SHAPE_RDFJS, construct)).toBeFalsy();
+      });
+    });
+  });
+
+  describe('#removeShapeFlag', () => {
+    const plain: FragmentSelectorShape = { type: 'operation', operation: { operationType: 'wildcard' }};
+    const sync: FragmentSelectorShape = { ...plain, synchronous: true };
+
+    it('should keep shapes without the flag', () => {
+      const shapes: FragmentSelectorShape[] = [
+        plain,
+        { ...plain, joinBindings: true },
+        { ...plain, children: [ plain ]},
+        { type: 'disjunction', children: [ plain ]},
+        { type: 'negation', child: plain },
+      ];
+      for (const shape of shapes) {
+        expect(removeShapeFlag(shape, 'synchronous')).toBe(shape);
+      }
+    });
+
+    it('should remove the flag', () => {
+      expect(removeShapeFlag(sync, 'synchronous')).toEqual(plain);
+      expect(removeShapeFlag({ ...plain, children: [ sync ]}, 'synchronous'))
+        .toEqual({ ...plain, children: [ plain ]});
+      expect(removeShapeFlag({ ...sync, children: [ plain ]}, 'synchronous'))
+        .toEqual({ ...plain, children: [ plain ]});
+      expect(removeShapeFlag({ type: 'conjunction', children: [ plain, sync ]}, 'synchronous'))
+        .toEqual({ type: 'conjunction', children: [ plain, plain ]});
+      expect(removeShapeFlag({ type: 'arity', min: 1, child: sync }, 'synchronous'))
+        .toEqual({ type: 'arity', min: 1, child: plain });
+      expect(removeShapeFlag({ ...sync, joinBindings: true }, 'joinBindings')).toEqual(sync);
+    });
+  });
+
+  describe('#doesShapeAcceptOperationInContext', () => {
+    const context = new ActionContext();
+
+    it('should not accept an extension function without extensionFunctionsAlwaysPushdown', () => {
+      expect(doesShapeAcceptOperationInContext(SHAPE_SPARQL_1_1, extensionFunctionFilter, context)).toBe(false);
+    });
+
+    it('should accept an extension function with extensionFunctionsAlwaysPushdown', () => {
+      const contextPushdown = context.set(KeysInitQuery.extensionFunctionsAlwaysPushdown, true);
+      expect(doesShapeAcceptOperationInContext(SHAPE_SPARQL_1_1, extensionFunctionFilter, contextPushdown)).toBe(true);
+    });
+
+    it('should apply the given options', () => {
+      const shapeWithoutJoinBindings: FragmentSelectorShape = {
+        type: 'operation',
+        operation: { operationType: 'wildcard' },
+      };
+      expect(doesShapeAcceptOperationInContext(shapeWithoutJoinBindings, pattern, context)).toBe(true);
+      expect(doesShapeAcceptOperationInContext(shapeWithoutJoinBindings, pattern, context, { joinBindings: true }))
+        .toBe(false);
+    });
+  });
+
+  describe('#getSourceSelectorShape', () => {
+    const context = new ActionContext({ [KeysInitQuery.dataFactory.name]: DF });
+
+    it('should request the shape in the given context for sources without context', async() => {
+      const getSelectorShape = jest.fn(async() => SHAPE_SPARQL_1_1);
+      await expect(getSourceSelectorShape(<any> { source: { getSelectorShape }}, context))
+        .resolves.toBe(SHAPE_SPARQL_1_1);
+      expect(getSelectorShape).toHaveBeenCalledWith(context);
+    });
+
+    it('should request the shape in the context of the source', async() => {
+      const getSelectorShape = jest.fn(async() => SHAPE_SPARQL_1_1);
+      const sourceContext = new ActionContext({ [KeysInitQuery.lenient.name]: true });
+      await expect(getSourceSelectorShape(<any> { source: { getSelectorShape }, context: sourceContext }, context))
+        .resolves.toBe(SHAPE_SPARQL_1_1);
+      expect(getSelectorShape).toHaveBeenCalledWith(context.merge(sourceContext));
+    });
+  });
+
+  describe('#passFullOperationToSource', () => {
+    const serviceExecutor: IServiceExecutor = { execute: async() => []};
+    const context = new ActionContext({ [KeysInitQuery.dataFactory.name]: DF });
+    const contextExecutors = context.set(KeysInitQuery.serviceExecutors, { 'ex:executor': serviceExecutor });
+    let getSelectorShape: jest.Mock;
+    let source: IQuerySourceWrapper;
+
+    beforeEach(() => {
+      getSelectorShape = jest.fn(async() => SHAPE_SPARQL_1_1);
+      source = <any> { source: { referenceValue: 'ex:source', getSelectorShape }};
+    });
+
+    it('should be true for a single source that accepts the operation', async() => {
+      await expect(passFullOperationToSource(pattern, [ source ], context)).resolves.toBe(true);
+    });
+
+    it('should be false for an extension function without extensionFunctionsAlwaysPushdown', async() => {
+      await expect(passFullOperationToSource(extensionFunctionFilter, [ source ], context)).resolves.toBe(false);
+    });
+
+    it('should be true for an extension function with extensionFunctionsAlwaysPushdown', async() => {
+      const contextPushdown = context.set(KeysInitQuery.extensionFunctionsAlwaysPushdown, true);
+      await expect(passFullOperationToSource(extensionFunctionFilter, [ source ], contextPushdown)).resolves.toBe(true);
+    });
+
+    it('should be true for SERVICE clauses without a custom executor', async() => {
+      const operation = AF.createJoin([ pattern, AF.createService(pattern, DF.namedNode('ex:other')) ]);
+      await expect(passFullOperationToSource(operation, [ source ], contextExecutors)).resolves.toBe(true);
+    });
+
+    it('should be true for SERVICE clauses with a variable target', async() => {
+      const operation = AF.createJoin([ pattern, AF.createService(pattern, DF.variable('service')) ]);
+      await expect(passFullOperationToSource(operation, [ source ], contextExecutors)).resolves.toBe(true);
+    });
+
+    it('should be true for a nested SERVICE clause with a custom executor', async() => {
+      const operation = AF.createService(
+        AF.createService(pattern, DF.namedNode('ex:executor')),
+        DF.namedNode('ex:other'),
+      );
+      await expect(passFullOperationToSource(operation, [ source ], contextExecutors)).resolves.toBe(true);
+    });
+
+    it('should be false for a SERVICE clause with a custom executor', async() => {
+      const operation = AF.createJoin([ pattern, AF.createService(pattern, DF.namedNode('ex:executor')) ]);
+      await expect(passFullOperationToSource(operation, [ source ], contextExecutors)).resolves.toBe(false);
+      expect(getSelectorShape).not.toHaveBeenCalled();
+    });
+
+    it('should be false for a SERVICE clause with a custom executor from the executor creator', async() => {
+      const operation = AF.createJoin([ pattern, AF.createService(pattern, DF.namedNode('ex:executor')) ]);
+      const contextCreator = context.set(
+        KeysInitQuery.serviceExecutorCreator,
+        (serviceNamedNode: RDF.NamedNode) => serviceNamedNode.value === 'ex:executor' ? serviceExecutor : undefined,
+      );
+      await expect(passFullOperationToSource(operation, [ source ], contextCreator)).resolves.toBe(false);
+    });
+
+    it('should throw when both custom SERVICE executors and an executor creator are configured', async() => {
+      const contextBoth = contextExecutors.set(KeysInitQuery.serviceExecutorCreator, () => undefined);
+      await expect(passFullOperationToSource(pattern, [], contextBoth))
+        .rejects.toThrow('Illegal simultaneous usage of serviceExecutorCreator and serviceExecutors in context');
     });
   });
 });

@@ -36,7 +36,7 @@ export class CliArgsHandlerQuery implements ICliArgsHandler {
         [ `$0 https://fragments.dbpedia.org/2016-04/en -q 'SELECT * { ?s ?p ?o }'`, '' ],
         [ `$0 https://fragments.dbpedia.org/2016-04/en -f query.sparql`, '' ],
         [ `$0 https://fragments.dbpedia.org/2016-04/en https://query.wikidata.org/sparql ...`, '' ],
-        [ `$0 hypermedia@https://fragments.dbpedia.org/2016-04/en sparql@https://query.wikidata.org/sparql ...`, '' ],
+        [ `$0 qpf@https://fragments.dbpedia.org/2016-04/en sparql@https://query.wikidata.org/sparql ...`, '' ],
       ])
       .options({
         query: {
@@ -85,7 +85,9 @@ export class CliArgsHandlerQuery implements ICliArgsHandler {
           choices: [
             'parsed',
             'logical',
+            'query',
             'physical',
+            'physical-stats',
             'physical-json',
           ],
         },

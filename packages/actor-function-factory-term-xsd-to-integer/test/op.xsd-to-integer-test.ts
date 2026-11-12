@@ -1,5 +1,7 @@
-import { runFuncTestTable } from '@comunica/bus-function-factory/test/util';
-import { Notation } from '@comunica/utils-expression-evaluator/test/util/TestTable';
+import {
+  runFuncTestTable,
+  Notation,
+} from '@comunica/utils-jest';
 import { ActorFunctionFactoryTermXsdToInteger } from '../lib';
 
 describe('to integer', () => {
@@ -14,6 +16,13 @@ describe('to integer', () => {
         "0" = "0"^^xsd:integer
         "1" = "1"^^xsd:integer
         "13" = "13"^^xsd:integer
+        "-5" = "-5"^^xsd:integer
+        "+5" = "5"^^xsd:integer
+        "-0" = "0"^^xsd:integer
+        "007" = "7"^^xsd:integer
+        '" 5"' = "5"^^xsd:integer
+        '"-5 "' = "-5"^^xsd:integer
+        "\\t\\n+5\\r\\n" = "5"^^xsd:integer
         "true"^^xsd:boolean = "1"^^xsd:integer
         "false"^^xsd:boolean = "0"^^xsd:integer
         "1"^^xsd:boolean = "1"^^xsd:integer
@@ -43,6 +52,12 @@ describe('to integer', () => {
         "2002-10-10T17:00:00Z"^^xsd:string = 'Invalid cast'
         "false"^^xsd:string = 'Invalid cast'
         "true"^^xsd:string = 'Invalid cast'
+        ""^^xsd:string = 'Invalid cast'
+        "-"^^xsd:string = 'Invalid cast'
+        "+-5"^^xsd:string = 'Invalid cast'
+        '"- 5"^^xsd:string' = 'Invalid cast'
+        '"5 5"^^xsd:string' = 'Invalid cast'
+        "\\u00A05"^^xsd:string = 'Invalid cast'
         "foo"^^xsd:integer = 'Invalid lexical form'
         "NaN"^^xsd:double = 'Invalid cast'
         "+INF"^^xsd:double = 'Invalid cast'

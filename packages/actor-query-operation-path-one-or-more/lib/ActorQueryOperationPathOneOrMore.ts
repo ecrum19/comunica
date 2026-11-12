@@ -9,10 +9,10 @@ import type {
   IActionContext,
   ComunicaDataFactory,
 } from '@comunica/types';
+import { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
-import { getSafeBindings } from '@comunica/utils-query-operation';
+import { getSafeBindings, groupRepeatedSubOperations } from '@comunica/utils-query-operation';
 import { BufferedIterator, MultiTransformIterator, TransformIterator } from 'asynciterator';
-import { Algebra, Factory } from 'sparqlalgebrajs';
 
 /**
  * A comunica Path OneOrMore Query Operation Actor.
@@ -21,12 +21,13 @@ export class ActorQueryOperationPathOneOrMore extends ActorAbstractPath {
   public readonly mediatorMergeBindingsContext: MediatorMergeBindingsContext;
 
   public constructor(args: IActorQueryOperationPathOneOrMoreArgs) {
-    super(args, Algebra.types.ONE_OR_MORE_PATH);
+    super(args, Algebra.Types.ONE_OR_MORE_PATH);
+    this.mediatorMergeBindingsContext = args.mediatorMergeBindingsContext;
   }
 
   public async runOperation(operation: Algebra.Path, context: IActionContext): Promise<IQueryOperationResult> {
     const dataFactory: ComunicaDataFactory = context.getSafe(KeysInitQuery.dataFactory);
-    const algebraFactory = new Factory(dataFactory);
+    const algebraFactory = new AlgebraFactory(dataFactory);
     const bindingsFactory = await BindingsFactory.create(
       this.mediatorMergeBindingsContext,
       context,
@@ -62,10 +63,31 @@ export class ActorQueryOperationPathOneOrMore extends ActorAbstractPath {
         metadata: async() => ({ ...await starEval.metadata(), variables }),
       };
     }
+    if (operation.subject.termType === 'Variable' && operation.subject.equals(operation.object)) {
+      const subjectVar = operation.subject;
+      const objectVar = this.generateVariable(dataFactory, operation);
+      const results = getSafeBindings(await this.mediatorQueryOperation.mediate({
+        context,
+        operation: algebraFactory.createPath(subjectVar, predicate, objectVar, operation.graph),
+      }));
+      const bindingsStream = results.bindingsStream.map<Bindings>(bindings =>
+        bindings.get(subjectVar)!.equals(bindings.get(objectVar)) ? bindings.delete(objectVar) : null);
+      return {
+        type: 'bindings',
+        bindingsStream,
+        metadata: async() => {
+          const metadata = await results.metadata();
+          return {
+            ...metadata,
+            variables: metadata.variables.filter(({ variable }) => !variable.equals(objectVar)),
+          };
+        },
+      };
+    }
     if (operation.subject.termType === 'Variable' && operation.object.termType === 'Variable') {
       // Get all the results of subjects with same predicate, but once, then fill in first variable for those
       const single = algebraFactory.createDistinct(
-        algebraFactory.createPath(operation.subject, operation.predicate.path, operation.object, operation.graph),
+        algebraFactory.createPath(operation.subject, predicate.path, operation.object, operation.graph),
       );
       const results = getSafeBindings(
         await this.mediatorQueryOperation.mediate({ context, operation: single }),
@@ -74,6 +96,9 @@ export class ActorQueryOperationPathOneOrMore extends ActorAbstractPath {
       const objectVar = operation.object;
 
       const termHashes = {};
+      // The path is walked by evaluating one sub-path per reached term,
+      // so group those evaluations in the physical query plan
+      const alpContext = groupRepeatedSubOperations(context, 'alp', this.name);
 
       const bindingsStream: MultiTransformIterator<Bindings, Bindings> = new MultiTransformIterator(
         results.bindingsStream,
@@ -92,7 +117,7 @@ export class ActorQueryOperationPathOneOrMore extends ActorAbstractPath {
                   object!,
                   predicate.path,
                   graph!,
-                  context,
+                  alpContext,
                   termHashes,
                   {},
                   it,

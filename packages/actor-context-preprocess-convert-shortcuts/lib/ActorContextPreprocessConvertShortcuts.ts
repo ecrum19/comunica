@@ -12,6 +12,7 @@ export class ActorContextPreprocessConvertShortcuts extends ActorContextPreproce
 
   public constructor(args: IActorContextPreprocessConvertShortcutsArgs) {
     super(args);
+    this.contextKeyShortcuts = args.contextKeyShortcuts;
   }
 
   public async test(_action: IAction): Promise<TestResult<IActorTest>> {
@@ -39,6 +40,8 @@ export class ActorContextPreprocessConvertShortcuts extends ActorContextPreproce
 export interface IActorContextPreprocessConvertShortcutsArgs extends IActorContextPreprocessArgs {
   /**
    * A record of context shortcuts to full context keys (as defined in @comunica/context-entries).
+   * These should be aligned with to IQueryContextCommon in @comunica/types,
+   * and possibly the CliArgsHandlers in @comunica/actor-init-query.
    * @range {json}
    * @default {{
    *   "sources": "@comunica/actor-init-query:querySourcesUnidentified",
@@ -53,6 +56,9 @@ export interface IActorContextPreprocessConvertShortcutsArgs extends IActorConte
    *   "queryTimestampHighResolution": "@comunica/actor-init-query:queryTimestampHighResolution",
    *   "httpProxyHandler": "@comunica/actor-http-proxy:httpProxyHandler",
    *   "lenient": "@comunica/actor-init-query:lenient",
+   *   "serviceAllowFileTargets": "@comunica/actor-init-query:serviceAllowFileTargets",
+   *   "serviceAllowVariableTargets": "@comunica/actor-init-query:serviceAllowVariableTargets",
+   *   "parseUnsupportedVersions": "@comunica/actor-init-query:parseUnsupportedVersions",
    *   "httpIncludeCredentials": "@comunica/bus-http:include-credentials",
    *   "httpAuth": "@comunica/bus-http:auth",
    *   "httpTimeout": "@comunica/bus-http:http-timeout",
@@ -60,6 +66,13 @@ export interface IActorContextPreprocessConvertShortcutsArgs extends IActorConte
    *   "httpRetryCount": "@comunica/bus-http:http-retry-count",
    *   "httpRetryDelayFallback": "@comunica/bus-http:http-retry-delay-fallback",
    *   "httpRetryDelayLimit": "@comunica/bus-http:http-retry-delay-limit",
+   *   "httpRetryStatusCodes": "@comunica/bus-http:http-retry-status-codes",
+   *   "httpRetryBodyCount": "@comunica/bus-http:http-retry-body-count",
+   *   "httpRetryBodyDelayFallback": "@comunica/bus-http:http-retry-body-delay-fallback",
+   *   "httpRetryBodyAllowUnsafe": "@comunica/bus-http:http-retry-body-allow-unsafe",
+   *   "httpRetryBodyMaxBytes": "@comunica/bus-http:http-retry-body-max-bytes",
+   *   "httpAbortSignal": "@comunica/bus-http:http-abort-controller",
+   *   "httpCache": "@comunica/bus-http:httpCache",
    *   "fetch": "@comunica/bus-http:fetch",
    *   "recoverBrokenLinks": "@comunica/bus-http-wayback:recover-broken-links",
    *   "readOnly": "@comunica/bus-query-operation:readOnly",
@@ -67,12 +80,21 @@ export interface IActorContextPreprocessConvertShortcutsArgs extends IActorConte
    *   "extensionFunctionsAlwaysPushdown": "@comunica/actor-init-query:extensionFunctionsAlwaysPushdown",
    *   "extensionFunctionCreator": "@comunica/actor-init-query:extensionFunctionCreator",
    *   "functionArgumentsCache": "@comunica/actor-init-query:functionArgumentsCache",
+   *   "serviceExecutors": "@comunica/actor-init-query:serviceExecutors",
+   *   "serviceExecutorCreator": "@comunica/actor-init-query:serviceExecutorCreator",
    *   "explain": "@comunica/actor-init-query:explain",
    *   "unionDefaultGraph": "@comunica/bus-query-operation:unionDefaultGraph",
    *   "traverse": "@comunica/bus-query-source-identify:traverse",
    *   "invalidateCache": "@comunica/actor-init-query:invalidateCache",
    *   "dataFactory": "@comunica/actor-init-query:dataFactory",
-   *   "distinctConstruct": "@comunica/actor-init-query:distinctConstruct"
+   *   "distinctConstruct": "@comunica/actor-init-query:distinctConstruct",
+   *   "nonLexicalComparison": "@comunica/utils-expression-evaluator:nonLexicalComparison",
+   *   "fullTermComparison": "@comunica/utils-expression-evaluator:fullTermComparison",
+   *   "existenceResolver": "@comunica/utils-expression-evaluator:existenceResolver",
+   *   "rdfSerializationPrefixes": "@comunica/bus-rdf-serialize:rdfSerializationPrefixes",
+   *   "dereferenceFromNamed": "@comunica/actor-init-query:dereferenceFromNamed",
+   *   "dereferenceFromNamedConflictMode": "@comunica/actor-init-query:dereferenceFromNamedConflictMode",
+   *   "rdfVariant": "@comunica/actor-init-query:rdfVariant"
    * }}
    */
   contextKeyShortcuts: Record<string, string>;

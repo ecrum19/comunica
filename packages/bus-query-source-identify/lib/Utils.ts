@@ -1,4 +1,5 @@
 import type { BindingsStream, ComunicaDataFactory, MetadataBindings, MetadataQuads, TermsOrder } from '@comunica/types';
+import type { Algebra } from '@comunica/utils-algebra';
 import type { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { ClosableIterator } from '@comunica/utils-iterator';
 import { validateMetadataQuads } from '@comunica/utils-metadata';
@@ -10,12 +11,11 @@ import {
   forEachTermsNested,
   getTermsNested,
   getValueNestedPath,
+  matchPatternMappings,
   reduceTermsNested,
   someTerms,
   uniqTerms,
 } from 'rdf-terms';
-import { matchPatternMappings } from 'rdf-terms/lib/QuadTermUtil';
-import type { Algebra } from 'sparqlalgebrajs';
 
 /**
  * Convert an iterator of quads to an iterator of bindings.
@@ -238,6 +238,9 @@ export function quadsMetadataToBindingsMetadata(
     ...metadataQuads,
     order: metadataQuads.order ?
       quadsOrderToBindingsOrder(dataFactory, metadataQuads.order, elementVariables) :
+      undefined,
+    termOrder: metadataQuads.termOrder ?
+      quadsOrderToBindingsOrder(dataFactory, metadataQuads.termOrder, elementVariables) :
       undefined,
     availableOrders: metadataQuads.availableOrders ?
       metadataQuads.availableOrders.map(orderDef => ({

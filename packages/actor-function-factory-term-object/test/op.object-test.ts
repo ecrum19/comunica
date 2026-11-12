@@ -1,5 +1,8 @@
-import { runFuncTestTable } from '@comunica/bus-function-factory/test/util';
-import { Notation } from '@comunica/utils-expression-evaluator/test/util/TestTable';
+import { ActorFunctionFactoryTermTriple } from '@comunica/actor-function-factory-term-triple';
+import {
+  runFuncTestTable,
+  Notation,
+} from '@comunica/utils-jest';
 import { ActorFunctionFactoryTermObject } from '../lib';
 
 describe('evaluation of \'OBJECT\'', () => {
@@ -7,13 +10,14 @@ describe('evaluation of \'OBJECT\'', () => {
   runFuncTestTable({
     registeredActors: [
       args => new ActorFunctionFactoryTermObject(args),
+      args => new ActorFunctionFactoryTermTriple(args),
     ],
     arity: 1,
     notation: Notation.Function,
     operation: 'OBJECT',
     testArray: [
-      [ '<< <ex:a> <ex:b> <ex:c> >>', 'ex:c' ],
-      [ '<< <ex:a2> <ex:b2> "123" >>', '"123"' ],
+      [ '<<( <ex:a> <ex:b> <ex:c> )>>', 'ex:c' ],
+      [ '<<( <ex:a2> <ex:b2> "123" )>>', '"123"' ],
     ],
   });
   runFuncTestTable({

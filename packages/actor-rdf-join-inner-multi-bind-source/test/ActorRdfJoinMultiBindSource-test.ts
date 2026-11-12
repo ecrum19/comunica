@@ -4,13 +4,13 @@ import type { MediatorRdfJoinSelectivity } from '@comunica/bus-rdf-join-selectiv
 import { KeysInitQuery } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IQuerySourceWrapper, IActionContext } from '@comunica/types';
+import { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { MetadataValidationState } from '@comunica/utils-metadata';
 import { assignOperationSource } from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
 import { ArrayIterator, AsyncIterator } from 'asynciterator';
 import { DataFactory } from 'rdf-data-factory';
-import { Algebra, Factory } from 'sparqlalgebrajs';
 import type {
   IActorRdfJoinMultiBindSourceTestSideData,
 } from '../lib/ActorRdfJoinMultiBindSource';
@@ -19,7 +19,7 @@ import {
 } from '../lib/ActorRdfJoinMultiBindSource';
 import '@comunica/utils-jest';
 
-const AF = new Factory();
+const AF = new AlgebraFactory();
 const DF = new DataFactory();
 const BF = new BindingsFactory(DF);
 
@@ -99,7 +99,7 @@ describe('ActorRdfJoinMultiBindSource', () => {
           getSelectorShape() {
             return {
               type: 'operation',
-              operation: { operationType: 'type', type: Algebra.types.PATTERN },
+              operation: { operationType: 'type', type: Algebra.Types.PATTERN },
               joinBindings: true,
             };
           },
@@ -216,7 +216,7 @@ describe('ActorRdfJoinMultiBindSource', () => {
         ]);
         await expect(result.metadata()).resolves.toEqual({
           state: expect.any(MetadataValidationState),
-          cardinality: { type: 'estimate', value: 9.600_000_000_000_001 },
+          cardinality: { type: 'estimate', value: 3 },
           variables: [
             { variable: DF.variable('a'), canBeUndef: false },
             { variable: DF.variable('b'), canBeUndef: false },
@@ -332,7 +332,7 @@ describe('ActorRdfJoinMultiBindSource', () => {
         ]);
         await expect(result.metadata()).resolves.toEqual({
           state: expect.any(MetadataValidationState),
-          cardinality: { type: 'estimate', value: 9.600_000_000_000_001 },
+          cardinality: { type: 'estimate', value: 3 },
 
           variables: [
             { variable: DF.variable('a'), canBeUndef: false },

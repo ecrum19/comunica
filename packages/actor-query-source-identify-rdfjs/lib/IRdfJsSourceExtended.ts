@@ -1,8 +1,14 @@
 // eslint-disable-next-line import/no-nodejs-modules
 import type { EventEmitter } from 'node:events';
 import type * as RDF from '@rdfjs/types';
+import type { QuadTermName } from 'rdf-terms';
 
 export interface IRdfJsSourceExtended extends RDF.Source {
+  /**
+   * If false, this source certainly contains no blank nodes.
+   * If true or `undefined`, it may contain blank nodes.
+   */
+  hasBlankNodes?: boolean;
   /**
    * A record indicating supported features of this source.
    */
@@ -13,6 +19,14 @@ export interface IRdfJsSourceExtended extends RDF.Source {
      * and must be replaced by `undefined` and filtered by the caller afterwards.
      */
     quotedTripleFiltering?: boolean;
+    /**
+     * If this is true, matchNodes and countNodes must be available.
+     */
+    indexNodes?: boolean;
+    /**
+     * If this is true, matchDistinctTerms and countDistinctTerms must be available.
+     */
+    indexDistinctTerms?: boolean;
   };
 
   /**
@@ -47,4 +61,57 @@ export interface IRdfJsSourceExtended extends RDF.Source {
     object: RDF.Term,
     graph: RDF.Term,
   ) => EventEmitter;
+
+  /**
+   * Returns a stream that produces all nodes as terms in the given graph.
+   * Nodes are all terms that are either a subject or object within the graph.
+   *
+   * This will only be used if `features.indexNodes` is true.
+   */
+  /**
+   * Synchronously returns all bindings matching the given quad pattern.
+   * @param bindingsFactory The factory that will be used to create bindings.
+   * @param subject The subject, which can be a variable.
+   * @param predicate The predicate, which can be a variable.
+   * @param object The object, which can be a variable.
+   * @param graph The graph, which can be a variable.
+   */
+  getBindings?: (
+    bindingsFactory: RDF.BindingsFactory,
+    subject: RDF.Term,
+    predicate: RDF.Term,
+    object: RDF.Term,
+    graph: RDF.Term,
+  ) => RDF.Bindings[];
+
+  matchNodes?: (graph: RDF.Term) => EventEmitter;
+
+  /**
+   * Returns the number of nodes in the given graph.
+   * Nodes are all terms that are either a subject or object within the graph.
+   *
+   * This will only be used if `features.indexNodes` is true.
+   */
+  countNodes?: (graph: RDF.Term) => number;
+
+  /**
+   * Returns a stream that produces all distinct combinations of the specified terms.
+   * The stream produces arrays where each element corresponds to a term in the termNames array.
+   *
+   * This will only be used if `features.indexDistinctTerms` is true.
+   *
+   * @param termNames The term names to retrieve.
+   * @param filters Optional term names that are bound to specific terms, acting as filters.
+   */
+  matchDistinctTerms?: (termNames: QuadTermName[], filters?: (RDF.Term | undefined)[]) => EventEmitter;
+
+  /**
+   * Returns the number of distinct combinations of the specified terms.
+   *
+   * This will only be used if `features.indexDistinctTerms` is true.
+   *
+   * @param termNames The term names to count combinations of.
+   * @param filters Optional term names that are bound to specific terms, acting as filters.
+   */
+  countDistinctTerms?: (termNames: QuadTermName[], filters?: (RDF.Term | undefined)[]) => number;
 }

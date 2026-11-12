@@ -1,14 +1,14 @@
 import { KeysInitQuery } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IActionContext } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
-import { Factory } from 'sparqlalgebrajs';
 import { ActorOptimizeQueryOperationRewriteAdd } from '../lib/ActorOptimizeQueryOperationRewriteAdd';
 import '@comunica/utils-jest';
 
 const DF = new DataFactory<RDF.BaseQuad>();
-const AF = new Factory();
+const AF = new AlgebraFactory();
 
 describe('ActorOptimizeQueryOperationRewriteAdd', () => {
   let bus: any;
@@ -26,18 +26,25 @@ describe('ActorOptimizeQueryOperationRewriteAdd', () => {
       actor = new ActorOptimizeQueryOperationRewriteAdd({ name: 'actor', bus });
     });
 
+    it('should not change operations without ADD operations', async() => {
+      const algebraFactory = new AlgebraFactory();
+      const operation = algebraFactory.createProject(
+        algebraFactory.createPattern(DF.variable('s'), DF.namedNode('p'), DF.variable('o')),
+        [ DF.variable('s') ],
+      );
+      const action = { operation, context: new ActionContext() };
+      const result = await actor.run(action);
+      expect(result.operation).toBe(operation);
+      expect(result.context).toBe(action.context);
+    });
+
     it('should always test', async() => {
       await expect(actor.test({ operation: <any> null, context })).resolves.toPassTestVoid();
     });
 
     it('should run with named source and named destination', async() => {
-      const op: any = {
-        operation: {
-          type: 'add',
-          source: DF.namedNode('SOURCE'),
-          destination: DF.namedNode('DEST'),
-          silent: false,
-        },
+      const op = {
+        operation: AF.createAdd(DF.namedNode('SOURCE'), DF.namedNode('DEST'), false),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);
@@ -47,13 +54,8 @@ describe('ActorOptimizeQueryOperationRewriteAdd', () => {
     });
 
     it('should run with default source and named destination', async() => {
-      const op: any = {
-        operation: {
-          type: 'add',
-          source: 'DEFAULT',
-          destination: DF.namedNode('DEST'),
-          silent: false,
-        },
+      const op = {
+        operation: AF.createAdd('DEFAULT', DF.namedNode('DEST'), false),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);
@@ -63,13 +65,8 @@ describe('ActorOptimizeQueryOperationRewriteAdd', () => {
     });
 
     it('should run with named source and default destination', async() => {
-      const op: any = {
-        operation: {
-          type: 'add',
-          source: DF.namedNode('SOURCE'),
-          destination: 'DEFAULT',
-          silent: false,
-        },
+      const op = {
+        operation: AF.createAdd(DF.namedNode('SOURCE'), 'DEFAULT', false),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);
@@ -79,19 +76,33 @@ describe('ActorOptimizeQueryOperationRewriteAdd', () => {
     });
 
     it('should run with default source and default destination', async() => {
-      const op: any = {
-        operation: {
-          type: 'add',
-          source: 'DEFAULT',
-          destination: 'DEFAULT',
-          silent: false,
-        },
+      const op = {
+        operation: AF.createAdd('DEFAULT', 'DEFAULT', false),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);
       expect(operation).toEqual(AF.createDeleteInsert(undefined, [
         AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o'), DF.defaultGraph()),
       ], AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o'), DF.defaultGraph())));
+    });
+
+    it('should run with every ADD of a composite update', async() => {
+      const op = {
+        operation: AF.createCompositeUpdate([
+          AF.createAdd(DF.namedNode('SOURCE1'), DF.namedNode('DEST1'), false),
+          AF.createAdd(DF.namedNode('SOURCE2'), DF.namedNode('DEST2'), false),
+        ]),
+        context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
+      };
+      const { operation } = await actor.run(op);
+      expect(operation).toEqual(AF.createCompositeUpdate([
+        AF.createDeleteInsert(undefined, [
+          AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o'), DF.namedNode('DEST1')),
+        ], AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o'), DF.namedNode('SOURCE1'))),
+        AF.createDeleteInsert(undefined, [
+          AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o'), DF.namedNode('DEST2')),
+        ], AF.createPattern(DF.variable('s'), DF.variable('p'), DF.variable('o'), DF.namedNode('SOURCE2'))),
+      ]));
     });
   });
 });

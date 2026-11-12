@@ -1,11 +1,11 @@
+import { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
-import { Factory } from 'sparqlalgebrajs';
 import { materializeOperation, materializeTerm } from '../lib/MaterializeBindings';
 
 const DF = new DataFactory();
-const AF = new Factory();
+const AF = new AlgebraFactory();
 const BF = new BindingsFactory(DF);
 
 const termNamedNode = DF.namedNode('a');
@@ -37,9 +37,9 @@ const bindingsAB = BF.bindings([
 ]);
 
 const valuesBindingsA: Record<string, RDF.Literal | RDF.NamedNode> = {};
-valuesBindingsA[`?${termVariableA.value}`] = <RDF.Literal> bindingsA.get(termVariableA);
+valuesBindingsA[termVariableA.value] = <RDF.Literal> bindingsA.get(termVariableA);
 const valuesBindingsB: Record<string, RDF.Literal | RDF.NamedNode> = {};
-valuesBindingsB[`?${termVariableB.value}`] = <RDF.Literal> bindingsAB.get(termVariableB);
+valuesBindingsB[termVariableB.value] = <RDF.Literal> bindingsAB.get(termVariableB);
 
 describe('materializeTerm', () => {
   it('should not materialize a named node with empty bindings', () => {
@@ -171,6 +171,54 @@ describe('materializeTerm', () => {
 });
 
 describe('materializeOperation', () => {
+  it('should materialize the variable target of a service operation', () => {
+    const endpoint = DF.namedNode('http://example.org/sparql');
+    expect(materializeOperation(
+      AF.createService(AF.createPattern(termVariableB, termNamedNode, termVariableC), termVariableA),
+      BF.bindings([[ DF.variable('a'), endpoint ]]),
+      AF,
+      BF,
+    ))
+      .toEqual(AF.createService(AF.createPattern(termVariableB, termNamedNode, termVariableC), endpoint));
+  });
+
+  it('should keep an unbound variable target of a service operation', () => {
+    expect(materializeOperation(
+      AF.createService(AF.createPattern(termVariableB, termNamedNode, termVariableC), termVariableD, true),
+      bindingsA,
+      AF,
+      BF,
+    ))
+      .toEqual(AF.createService(AF.createPattern(termVariableB, termNamedNode, termVariableC), termVariableD, true));
+  });
+
+  it('should materialize within the body of a service operation', () => {
+    expect(materializeOperation(
+      AF.createService(AF.createPattern(termVariableA, termNamedNode, termVariableC), termNamedNode),
+      bindingsA,
+      AF,
+      BF,
+    ))
+      .toEqual(AF.createService(AF.createPattern(valueA, termNamedNode, termVariableC), termNamedNode));
+  });
+
+  it('should materialize a service operation and keep metadata', () => {
+    const metadata = { a: 'b' };
+    expect(materializeOperation(
+      Object.assign(
+        AF.createService(AF.createPattern(termVariableA, termNamedNode, termVariableC), termNamedNode),
+        { metadata },
+      ),
+      bindingsA,
+      AF,
+      BF,
+    ))
+      .toEqual(Object.assign(
+        AF.createService(AF.createPattern(valueA, termNamedNode, termVariableC), termNamedNode),
+        { metadata },
+      ));
+  });
+
   it('should materialize a quad pattern with empty bindings', () => {
     expect(materializeOperation(
       AF.createPattern(termVariableA, termNamedNode, termVariableC, termNamedNode),
@@ -507,6 +555,30 @@ describe('materializeOperation', () => {
     )).toThrow(new Error('Tried to bind variable ?a in a GROUP BY operator.'));
   });
 
+  it('should not touch a group operation with ' +
+    'all binding variables non-equal to the target variable for strictTargetVariables', () => {
+    expect(materializeOperation(AF.createGroup(
+      AF.createPattern(termVariableA, termNamedNode, termVariableC, termNamedNode),
+      [ termVariableD ],
+      [ AF.createBoundAggregate(
+        termVariableB,
+        'SUM',
+        AF.createTermExpression(termVariableA),
+        true,
+      ) ],
+    ), bindingsA, AF, BF, { strictTargetVariables: true }))
+      .toEqual(AF.createGroup(
+        AF.createPattern(valueA, termNamedNode, termVariableC, termNamedNode),
+        [ termVariableD ],
+        [ AF.createBoundAggregate(
+          termVariableB,
+          'SUM',
+          AF.createTermExpression(valueA),
+          true,
+        ) ],
+      ));
+  });
+
   it('should modify a group operation with a binding variable equal to the target variable', () => {
     expect(materializeOperation(
       AF.createGroup(
@@ -653,7 +725,7 @@ describe('materializeOperation', () => {
             [ termVariableA ],
             [
               {
-                '?a': valueA,
+                a: valueA,
               },
             ],
           ),
@@ -733,7 +805,7 @@ describe('materializeOperation', () => {
     expect(materializeOperation(
       AF.createValues(
         [ termVariableB, termVariableD ],
-        [{ '?b': valueC }],
+        [{ b: valueC }],
       ),
       bindingsA,
       AF,
@@ -741,7 +813,7 @@ describe('materializeOperation', () => {
     ))
       .toEqual(AF.createValues(
         [ termVariableB, termVariableD ],
-        [{ '?b': valueC }],
+        [{ b: valueC }],
       ));
   });
 
@@ -749,7 +821,7 @@ describe('materializeOperation', () => {
     expect(materializeOperation(
       AF.createValues(
         [ termVariableB, termVariableD ],
-        [{ '?b': valueC }],
+        [{ b: valueC }],
       ),
       bindingsA,
       AF,
@@ -758,7 +830,7 @@ describe('materializeOperation', () => {
     ))
       .toEqual(AF.createValues(
         [ termVariableB, termVariableD ],
-        [{ '?b': valueC }],
+        [{ b: valueC }],
       ));
   });
 
@@ -767,7 +839,7 @@ describe('materializeOperation', () => {
     expect(() => materializeOperation(
       AF.createValues(
         [ termVariableA, termVariableD ],
-        [{ '?a': valueC, '?d': valueC }],
+        [{ a: valueC, d: valueC }],
       ),
       bindingsA,
       AF,
@@ -780,7 +852,7 @@ describe('materializeOperation', () => {
     expect(materializeOperation(
       AF.createValues(
         [ termVariableA, termVariableD ],
-        [{ '?a': valueA, '?d': valueC }],
+        [{ a: valueA, d: valueC }],
       ),
       bindingsA,
       AF,
@@ -788,7 +860,7 @@ describe('materializeOperation', () => {
     ))
       .toEqual(AF.createValues(
         [ termVariableD ],
-        [{ '?d': valueC }],
+        [{ d: valueC }],
       ));
   });
 
@@ -798,8 +870,8 @@ describe('materializeOperation', () => {
       AF.createValues(
         [ termVariableA, termVariableD ],
         [
-          { '?a': valueA, '?d': valueC },
-          { '?a': valueC, '?d': valueC },
+          { a: valueA, d: valueC },
+          { a: valueC, d: valueC },
         ],
       ),
       bindingsA,
@@ -808,8 +880,27 @@ describe('materializeOperation', () => {
     ))
       .toEqual(AF.createValues(
         [ termVariableD ],
-        [{ '?d': valueC }],
+        [{ d: valueC }],
       ));
+  });
+
+  it('should not modify a filter expression with empty bindings', () => {
+    const filterOp = AF.createFilter(
+      AF.createBgp([
+        AF.createPattern(termVariableA, termNamedNode, termVariableB, termNamedNode),
+      ]),
+      AF.createOperatorExpression('contains', [
+        AF.createTermExpression(termVariableA),
+        AF.createTermExpression(termVariableB),
+      ]),
+    );
+    expect(materializeOperation(
+      filterOp,
+      bindingsEmpty,
+      AF,
+      BF,
+    ))
+      .toEqual(filterOp);
   });
 
   it('should not modify a filter expression without operator as expression', () => {
@@ -840,17 +931,15 @@ describe('materializeOperation', () => {
       ));
   });
 
-  it('should not modify a filter expression without matching variables', () => {
+  it('should modify a filter expression wrapping a filter expression without operator as expression', () => {
+    // The inner filter is left untouched, so the outer one has to be materialized on its own merits.
     expect(materializeOperation(
       AF.createFilter(
-        AF.createBgp([
-          AF.createPattern(termVariableB, termNamedNode, termVariableC, termNamedNode),
-          AF.createPattern(termNamedNode, termVariableB, termVariableC, termNamedNode),
-        ]),
-        AF.createOperatorExpression('contains', [
+        AF.createFilter(
+          AF.createPattern(termVariableA, termNamedNode, termVariableB, termNamedNode),
           AF.createTermExpression(termVariableB),
-          AF.createTermExpression(termVariableB),
-        ]),
+        ),
+        AF.createOperatorExpression('!', [ AF.createTermExpression(termVariableA) ]),
       ),
       bindingsA,
       AF,
@@ -859,16 +948,142 @@ describe('materializeOperation', () => {
       .toEqual(AF.createFilter(
         AF.createJoin([
           AF.createValues([ termVariableA ], [ valuesBindingsA ]),
-          AF.createBgp([
-            AF.createPattern(termVariableB, termNamedNode, termVariableC, termNamedNode),
-            AF.createPattern(termNamedNode, termVariableB, termVariableC, termNamedNode),
-          ]),
+          AF.createFilter(
+            AF.createPattern(termVariableA, termNamedNode, termVariableB, termNamedNode),
+            AF.createTermExpression(termVariableB),
+          ),
+        ]),
+        AF.createOperatorExpression('!', [ AF.createTermExpression(valueA) ]),
+      ));
+  });
+
+  it('should not modify a filter expression without matching variables', () => {
+    const filterOp = AF.createFilter(
+      AF.createBgp([
+        AF.createPattern(termVariableB, termNamedNode, termVariableC, termNamedNode),
+        AF.createPattern(termNamedNode, termVariableB, termVariableC, termNamedNode),
+      ]),
+      AF.createOperatorExpression('contains', [
+        AF.createTermExpression(termVariableB),
+        AF.createTermExpression(termVariableB),
+      ]),
+    );
+    expect(materializeOperation(
+      filterOp,
+      bindingsA,
+      AF,
+      BF,
+    ))
+      .toEqual(filterOp);
+  });
+
+  it('should only add a values clause for bound variables occurring in the filter expression', () => {
+    expect(materializeOperation(
+      AF.createFilter(
+        AF.createBgp([
+          AF.createPattern(termVariableD, termNamedNode, termVariableC, termNamedNode),
         ]),
         AF.createOperatorExpression('contains', [
           AF.createTermExpression(termVariableB),
-          AF.createTermExpression(termVariableB),
+          AF.createTermExpression(termVariableD),
+        ]),
+      ),
+      bindingsAB,
+      AF,
+      BF,
+    ))
+      .toEqual(AF.createFilter(
+        AF.createJoin([
+          AF.createValues([ termVariableB ], [ valuesBindingsB ]),
+          AF.createBgp([
+            AF.createPattern(termVariableD, termNamedNode, termVariableC, termNamedNode),
+          ]),
+        ]),
+        AF.createOperatorExpression('contains', [
+          AF.createTermExpression(valueB),
+          AF.createTermExpression(termVariableD),
         ]),
       ));
+  });
+
+  it('should only add a values clause for bound variables occurring in the filter input', () => {
+    expect(materializeOperation(
+      AF.createFilter(
+        AF.createBgp([
+          AF.createPattern(termVariableB, termNamedNode, termVariableD, termNamedNode),
+        ]),
+        AF.createOperatorExpression('contains', [
+          AF.createTermExpression(termVariableD),
+          AF.createTermExpression(termVariableD),
+        ]),
+      ),
+      bindingsAB,
+      AF,
+      BF,
+    ))
+      .toEqual(AF.createFilter(
+        AF.createJoin([
+          AF.createValues([ termVariableB ], [ valuesBindingsB ]),
+          AF.createBgp([
+            AF.createPattern(valueB, termNamedNode, termVariableD, termNamedNode),
+          ]),
+        ]),
+        AF.createOperatorExpression('contains', [
+          AF.createTermExpression(termVariableD),
+          AF.createTermExpression(termVariableD),
+        ]),
+      ));
+  });
+
+  it('should not add values clauses in union branches that do not use the bound variables', () => {
+    expect(materializeOperation(
+      AF.createUnion([
+        AF.createFilter(
+          AF.createBgp([
+            AF.createPattern(termVariableA, termNamedNode, termVariableD, termNamedNode),
+          ]),
+          AF.createOperatorExpression('contains', [
+            AF.createTermExpression(termVariableD),
+            AF.createTermExpression(termVariableD),
+          ]),
+        ),
+        AF.createFilter(
+          AF.createBgp([
+            AF.createPattern(termVariableB, termNamedNode, termVariableD, termNamedNode),
+          ]),
+          AF.createOperatorExpression('contains', [
+            AF.createTermExpression(termVariableD),
+            AF.createTermExpression(termVariableD),
+          ]),
+        ),
+      ]),
+      bindingsA,
+      AF,
+      BF,
+    ))
+      .toEqual(AF.createUnion([
+        AF.createFilter(
+          AF.createJoin([
+            AF.createValues([ termVariableA ], [ valuesBindingsA ]),
+            AF.createBgp([
+              AF.createPattern(valueA, termNamedNode, termVariableD, termNamedNode),
+            ]),
+          ]),
+          AF.createOperatorExpression('contains', [
+            AF.createTermExpression(termVariableD),
+            AF.createTermExpression(termVariableD),
+          ]),
+        ),
+        AF.createFilter(
+          AF.createBgp([
+            AF.createPattern(termVariableB, termNamedNode, termVariableD, termNamedNode),
+          ]),
+          AF.createOperatorExpression('contains', [
+            AF.createTermExpression(termVariableD),
+            AF.createTermExpression(termVariableD),
+          ]),
+        ),
+      ]));
   });
 
   it('should modify a filter expression with matching variables', () => {
@@ -927,7 +1142,7 @@ describe('materializeOperation', () => {
           ]),
         ]),
         AF.createOperatorExpression('contains', [
-          AF.createTermExpression(DF.literal('true', DF.namedNode('http://www.w3.org/2001/XMLSchema#boolean'))),
+          AF.createTermExpression(AF.dataFactory.literal('true', DF.namedNode('http://www.w3.org/2001/XMLSchema#boolean'))),
           AF.createTermExpression(termVariableB),
         ]),
       ));
@@ -1047,16 +1262,16 @@ describe('materializeOperation', () => {
       AF.createFilter(
         AF.createFilter(
           AF.createBgp([
-            AF.createPattern(termVariableB, termNamedNode, termVariableC, termNamedNode),
+            AF.createPattern(termVariableA, termNamedNode, termVariableC, termNamedNode),
             AF.createPattern(termNamedNode, termVariableB, termVariableC, termNamedNode),
           ]),
           AF.createOperatorExpression('contains', [
-            AF.createTermExpression(termVariableB),
+            AF.createTermExpression(termVariableA),
             AF.createTermExpression(termVariableB),
           ]),
         ),
         AF.createOperatorExpression('contains', [
-          AF.createTermExpression(termVariableB),
+          AF.createTermExpression(termVariableA),
           AF.createTermExpression(termVariableB),
         ]),
       ),
@@ -1071,20 +1286,134 @@ describe('materializeOperation', () => {
             AF.createJoin([
               AF.createValues([ termVariableA ], [ valuesBindingsA ]),
               AF.createBgp([
-                AF.createPattern(termVariableB, termNamedNode, termVariableC, termNamedNode),
+                AF.createPattern(valueA, termNamedNode, termVariableC, termNamedNode),
                 AF.createPattern(termNamedNode, termVariableB, termVariableC, termNamedNode),
               ]),
             ]),
             AF.createOperatorExpression('contains', [
-              AF.createTermExpression(termVariableB),
+              AF.createTermExpression(valueA),
               AF.createTermExpression(termVariableB),
             ]),
           ),
         ]),
         AF.createOperatorExpression('contains', [
-          AF.createTermExpression(termVariableB),
+          AF.createTermExpression(valueA),
           AF.createTermExpression(termVariableB),
         ]),
+      ));
+  });
+
+  it('should materialize a filter with an operator expression and keep metadata', () => {
+    const metadata = { scopedSource: 'source' };
+    const operation = materializeOperation(
+      Object.assign(AF.createFilter(
+        AF.createPattern(termVariableA, termNamedNode, termVariableB, termNamedNode),
+        AF.createTermExpression(termVariableB),
+      ), { metadata }),
+      bindingsA,
+      AF,
+      BF,
+    );
+    expect(operation.type).toBe(Algebra.Types.FILTER);
+    expect(operation.metadata).toEqual(metadata);
+  });
+
+  it('should materialize a filter with an existence expression and keep metadata', () => {
+    const metadata = { scopedSource: 'source' };
+    const operation = materializeOperation(
+      Object.assign(AF.createFilter(
+        AF.createPattern(termVariableA, termNamedNode, termVariableB, termNamedNode),
+        AF.createExistenceExpression(
+          true,
+          AF.createPattern(termNamedNode, termNamedNode, termVariableA, termNamedNode),
+        ),
+      ), { metadata }),
+      bindingsA,
+      AF,
+      BF,
+    );
+    expect(operation).toEqual(Object.assign(AF.createFilter(
+      AF.createPattern(valueA, termNamedNode, termVariableB, termNamedNode),
+      AF.createExistenceExpression(
+        true,
+        AF.createPattern(termNamedNode, termNamedNode, valueA, termNamedNode),
+      ),
+    ), { metadata }));
+  });
+
+  it('should modify a filter expression with an existence expression with matching variables', () => {
+    expect(materializeOperation(
+      AF.createFilter(
+        AF.createBgp([
+          AF.createPattern(termVariableA, termNamedNode, termVariableB, termNamedNode),
+        ]),
+        AF.createExistenceExpression(
+          true,
+          AF.createBgp([
+            AF.createPattern(termNamedNode, termNamedNode, termVariableA, termNamedNode),
+          ]),
+        ),
+      ),
+      bindingsA,
+      AF,
+      BF,
+    ))
+      .toEqual(AF.createFilter(
+        AF.createBgp([
+          AF.createPattern(valueA, termNamedNode, termVariableB, termNamedNode),
+        ]),
+        AF.createExistenceExpression(
+          true,
+          AF.createBgp([
+            AF.createPattern(termNamedNode, termNamedNode, valueA, termNamedNode),
+          ]),
+        ),
+      ));
+  });
+
+  it('should modify a filter expression with a nested existence expression with matching variables', () => {
+    expect(materializeOperation(
+      AF.createFilter(
+        AF.createFilter(
+          AF.createBgp([
+            AF.createPattern(termVariableA, termNamedNode, termVariableB, termNamedNode),
+          ]),
+          AF.createExistenceExpression(
+            true,
+            AF.createBgp([
+              AF.createPattern(termNamedNode, termNamedNode, termVariableA, termNamedNode),
+            ]),
+          ),
+        ),
+        AF.createExistenceExpression(
+          false,
+          AF.createBgp([
+            AF.createPattern(termVariableA, termNamedNode, termVariableB, termNamedNode),
+          ]),
+        ),
+      ),
+      bindingsA,
+      AF,
+      BF,
+    ))
+      .toEqual(AF.createFilter(
+        AF.createFilter(
+          AF.createBgp([
+            AF.createPattern(valueA, termNamedNode, termVariableB, termNamedNode),
+          ]),
+          AF.createExistenceExpression(
+            true,
+            AF.createBgp([
+              AF.createPattern(termNamedNode, termNamedNode, valueA, termNamedNode),
+            ]),
+          ),
+        ),
+        AF.createExistenceExpression(
+          false,
+          AF.createBgp([
+            AF.createPattern(valueA, termNamedNode, termVariableB, termNamedNode),
+          ]),
+        ),
       ));
   });
 

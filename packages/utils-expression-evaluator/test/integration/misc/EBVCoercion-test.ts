@@ -1,10 +1,12 @@
-import { getMockSuperTypeProvider } from '@comunica/utils-expression-evaluator/test/util/helpers';
+import {
+  getMockSuperTypeProvider,
+  bool,
+  Notation,
+  runTestTable,
+} from '@comunica/utils-jest';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
 import { TermTransformer, TypeURL } from '../../../lib';
-import { bool } from '../../util/Aliases';
-import { Notation } from '../../util/TestTable';
-import { runTestTable } from '../../util/utils';
 
 const DF = new DataFactory();
 
@@ -33,6 +35,13 @@ describe('the coercion of RDF terms to it\'s EBV like', () => {
     });
   }
 
+  function testLiteralCannotCoerce(someVaridk: RDF.Literal) {
+    it(`should not coerce ${someVaridk.value}@"${someVaridk.language}"^^${someVaridk.datatype.value}`, () => {
+      expect(() => transformer.transformLiteral(someVaridk).coerceEBV())
+        .toThrow('Cannot coerce term to EBV');
+    });
+  }
+
   describe('raw literals tests', () => {
     const booleanType = DF.namedNode(TypeURL.XSD_BOOLEAN);
     const integerType = DF.namedNode(TypeURL.XSD_INTEGER);
@@ -41,18 +50,20 @@ describe('the coercion of RDF terms to it\'s EBV like', () => {
     const unsignedIntType = DF.namedNode(TypeURL.XSD_UNSIGNED_INT);
     const floatType = DF.namedNode(TypeURL.XSD_FLOAT);
 
-    testCoercesTo('non lexical', booleanType, false);
-    testCoercesTo('non lexical', integerType, false);
+    testCannotCoerce('non lexical', booleanType);
+    testCannotCoerce('non lexical', integerType);
 
     testCoercesTo('true', booleanType, true);
     testCoercesTo('false', booleanType, false);
 
     testLiteralCoercesTo(DF.literal(''), false);
-    testLiteralCoercesTo(DF.literal('', 'en'), false);
+    testLiteralCannotCoerce(DF.literal('', 'en'));
+    testLiteralCannotCoerce(DF.literal('', { language: 'en', direction: 'ltr' }));
     testCoercesTo('', stringType, false);
 
     testLiteralCoercesTo(DF.literal('a'), true);
-    testLiteralCoercesTo(DF.literal('a', 'en'), true);
+    testLiteralCannotCoerce(DF.literal('a', 'en'));
+    testLiteralCannotCoerce(DF.literal('a', { language: 'en', direction: 'ltr' }));
     testCoercesTo('a', stringType, true);
 
     testCoercesTo('0', integerType, false);

@@ -1,13 +1,13 @@
 import { KeysInitQuery } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IQuerySourceWrapper } from '@comunica/types';
+import { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { assignOperationSource, getOperationSource } from '@comunica/utils-query-operation';
 import { DataFactory } from 'rdf-data-factory';
-import { Algebra, Factory } from 'sparqlalgebrajs';
 import { ActorOptimizeQueryOperationGroupSources } from '../lib/ActorOptimizeQueryOperationGroupSources';
 import '@comunica/utils-jest';
 
-const AF = new Factory();
+const AF = new AlgebraFactory();
 const DF = new DataFactory();
 
 describe('ActorOptimizeQueryOperationGroupSources', () => {
@@ -42,7 +42,7 @@ describe('ActorOptimizeQueryOperationGroupSources', () => {
         type: 'operation',
         operation: {
           operationType: 'type',
-          type: Algebra.types.PATTERN,
+          type: Algebra.Types.PATTERN,
         },
       }),
     },
@@ -157,6 +157,122 @@ describe('ActorOptimizeQueryOperationGroupSources', () => {
               [],
             ),
           );
+        });
+
+        it('should group a singular sub-input for Filter with an EXISTS input of the same source', async() => {
+          const opIn = AF.createFilter(
+            assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('o')),
+              source1,
+            ),
+            AF.createExistenceExpression(false, AF.createJoin([
+              assignOperationSource(
+                AF.createPattern(DF.namedNode('s'), DF.namedNode('q'), DF.namedNode('o')),
+                source1,
+              ),
+              assignOperationSource(
+                AF.createPattern(DF.namedNode('o'), DF.namedNode('r'), DF.namedNode('o')),
+                source1,
+              ),
+            ])),
+          );
+          const opOut = await actor.groupOperation(opIn, ctx);
+          expect(opOut).toEqual(assignOperationSource(
+            AF.createFilter(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('o')),
+              AF.createExistenceExpression(false, AF.createJoin([
+                AF.createPattern(DF.namedNode('s'), DF.namedNode('q'), DF.namedNode('o')),
+                AF.createPattern(DF.namedNode('o'), DF.namedNode('r'), DF.namedNode('o')),
+              ])),
+            ),
+            source1,
+          ));
+        });
+
+        it('should not group a singular sub-input for Filter with an EXISTS input of another source', async() => {
+          const opIn = AF.createFilter(
+            assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('o')),
+              source1,
+            ),
+            AF.createExistenceExpression(false, AF.createJoin([
+              assignOperationSource(
+                AF.createPattern(DF.namedNode('s'), DF.namedNode('q'), DF.namedNode('o')),
+                source2,
+              ),
+              assignOperationSource(
+                AF.createPattern(DF.namedNode('o'), DF.namedNode('r'), DF.namedNode('o')),
+                source2,
+              ),
+            ])),
+          );
+          const opOut = await actor.groupOperation(opIn, ctx);
+          expect(opOut).toEqual(AF.createFilter(
+            assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('o')),
+              source1,
+            ),
+            AF.createExistenceExpression(false, assignOperationSource(
+              AF.createJoin([
+                AF.createPattern(DF.namedNode('s'), DF.namedNode('q'), DF.namedNode('o')),
+                AF.createPattern(DF.namedNode('o'), DF.namedNode('r'), DF.namedNode('o')),
+              ]),
+              source2,
+            )),
+          ));
+        });
+
+        it('should not group a singular sub-input for Filter with a NOT EXISTS input without source', async() => {
+          // Pruning leaves such an empty union when no source has results for the pattern within the NOT EXISTS
+          const opIn = AF.createFilter(
+            assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('o')),
+              source1,
+            ),
+            AF.createExistenceExpression(true, AF.createUnion([])),
+          );
+          const opOut = await actor.groupOperation(opIn, ctx);
+          expect(opOut).toEqual(AF.createFilter(
+            assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('o')),
+              source1,
+            ),
+            AF.createExistenceExpression(true, AF.createUnion([])),
+          ));
+        });
+      });
+
+      describe('for a left join operation', () => {
+        it('should not group patterns with equal sources if its NOT EXISTS input has another source', async() => {
+          const opIn = AF.createLeftJoin(
+            assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('o')),
+              source1,
+            ),
+            assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('y')),
+              source1,
+            ),
+            AF.createExistenceExpression(true, assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('q'), DF.namedNode('o')),
+              source2,
+            )),
+          );
+          const opOut = await actor.groupOperation(opIn, ctx);
+          expect(opOut).toEqual(AF.createLeftJoin(
+            assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('o')),
+              source1,
+            ),
+            assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('p'), DF.namedNode('y')),
+              source1,
+            ),
+            AF.createExistenceExpression(true, assignOperationSource(
+              AF.createPattern(DF.namedNode('s'), DF.namedNode('q'), DF.namedNode('o')),
+              source2,
+            )),
+          ));
         });
       });
 
@@ -631,6 +747,91 @@ describe('ActorOptimizeQueryOperationGroupSources', () => {
         expect(getOperationSource(out)).toBe(source1);
         expect(getOperationSource(inputs[0])).toBeUndefined();
         expect(getOperationSource(inputs[1])).toBeUndefined();
+      });
+
+      it('should return the grouped operation for inputs with another source', async() => {
+        const grouped = AF.createUnion([]);
+        const inputs = [
+          assignOperationSource(AF.createNop(), source1),
+          assignOperationSource(AF.createNop(), source2),
+        ];
+        await expect(actor.moveSourceAnnotationUpwardsIfPossible(
+          grouped,
+          inputs,
+          source1,
+          new ActionContext(),
+        )).resolves.toBe(grouped);
+        expect(getOperationSource(inputs[0])).toBe(source1);
+        expect(getOperationSource(inputs[1])).toBe(source2);
+      });
+    });
+
+    describe('isPossibleToMoveSourceAnnotationUpwards', () => {
+      it('should return true for supported shape without extension functions', () => {
+        const ctx = new ActionContext();
+        expect(actor.isPossibleToMoveSourceAnnotationUpwards(
+          AF.createNop(),
+          { type: 'operation', operation: { operationType: 'wildcard' }},
+          ctx,
+        )).toBeTruthy();
+      });
+
+      it('should return true for supported shape with extension functions on non-expression', () => {
+        const ctx = new ActionContext({ [KeysInitQuery.extensionFunctions.name]: {}});
+        expect(actor.isPossibleToMoveSourceAnnotationUpwards(
+          AF.createNop(),
+          { type: 'operation', operation: { operationType: 'wildcard' }},
+          ctx,
+        )).toBeTruthy();
+      });
+
+      it('should return true for supported shape with extension functions on local named expression', () => {
+        const ctx = new ActionContext({ [KeysInitQuery.extensionFunctions.name]: {
+          'ex:f': true,
+        }});
+        expect(actor.isPossibleToMoveSourceAnnotationUpwards(
+          AF.createFilter(AF.createNop(), AF.createNamedExpression(DF.namedNode('ex:f'), [])),
+          {
+            type: 'disjunction',
+            children: [
+              { type: 'operation', operation: { operationType: 'wildcard' }},
+              {
+                type: 'operation',
+                operation: { operationType: 'type', type: Algebra.Types.EXPRESSION, extensionFunctions: [ 'ex:f' ]},
+              },
+            ],
+          },
+          ctx,
+        )).toBeTruthy();
+      });
+
+      it('should return false for supported shape with extension functions on local term expression', () => {
+        const ctx = new ActionContext({ [KeysInitQuery.extensionFunctions.name]: {
+          'ex:f': true,
+        }});
+        expect(actor.isPossibleToMoveSourceAnnotationUpwards(
+          AF.createFilter(AF.createNop(), AF.createTermExpression(DF.namedNode('ex:f'))),
+          {
+            type: 'disjunction',
+            children: [
+              { type: 'operation', operation: { operationType: 'wildcard' }},
+              {
+                type: 'operation',
+                operation: { operationType: 'type', type: Algebra.Types.EXPRESSION, extensionFunctions: [ 'ex:f' ]},
+              },
+            ],
+          },
+          ctx,
+        )).toBeTruthy();
+      });
+
+      it('should return false for supported shape with extension functions on expression', () => {
+        const ctx = new ActionContext({ [KeysInitQuery.extensionFunctions.name]: {}});
+        expect(actor.isPossibleToMoveSourceAnnotationUpwards(
+          AF.createNamedExpression(DF.namedNode('ex:f'), []),
+          { type: 'operation', operation: { operationType: 'wildcard' }},
+          ctx,
+        )).toBeFalsy();
       });
     });
   });

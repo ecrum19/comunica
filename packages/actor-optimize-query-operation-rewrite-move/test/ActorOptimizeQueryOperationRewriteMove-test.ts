@@ -1,14 +1,14 @@
 import { KeysInitQuery } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IActionContext } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
-import { Factory } from 'sparqlalgebrajs';
 import { ActorOptimizeQueryOperationRewriteMove } from '../lib/ActorOptimizeQueryOperationRewriteMove';
 import '@comunica/utils-jest';
 
 const DF = new DataFactory<RDF.BaseQuad>();
-const AF = new Factory();
+const AF = new AlgebraFactory();
 
 describe('ActorOptimizeQueryOperationRewriteMove', () => {
   let bus: any;
@@ -24,6 +24,18 @@ describe('ActorOptimizeQueryOperationRewriteMove', () => {
 
     beforeEach(() => {
       actor = new ActorOptimizeQueryOperationRewriteMove({ name: 'actor', bus });
+    });
+
+    it('should not change operations without MOVE operations', async() => {
+      const algebraFactory = new AlgebraFactory();
+      const operation = algebraFactory.createProject(
+        algebraFactory.createPattern(DF.variable('s'), DF.namedNode('p'), DF.variable('o')),
+        [ DF.variable('s') ],
+      );
+      const action = { operation, context: new ActionContext() };
+      const result = await actor.run(action);
+      expect(result.operation).toBe(operation);
+      expect(result.context).toBe(action.context);
     });
 
     it('should always test', async() => {

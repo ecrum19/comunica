@@ -18,6 +18,7 @@ export class ActorRdfJoinEntriesSortSelectivity extends ActorRdfJoinEntriesSort 
 
   public constructor(args: IActorRdfJoinEntriesSortSelectivityArgs) {
     super(args);
+    this.mediatorJoinSelectivity = args.mediatorJoinSelectivity;
   }
 
   public async test(_action: IActionRdfJoinEntriesSort): Promise<TestResult<IActorRdfJoinEntriesSortTest>> {
@@ -36,7 +37,8 @@ export class ActorRdfJoinEntriesSortSelectivity extends ActorRdfJoinEntriesSort 
           entries: [ remainingEntry, ...finalEntries ],
           context: action.context,
         });
-        if (selectivity < minSelectivity) {
+        if (selectivity < minSelectivity || (selectivity === minSelectivity &&
+          remainingEntry.metadata.cardinality.value < remainingEntries[minEntryIndex].metadata.cardinality.value)) {
           minSelectivity = selectivity;
           minEntryIndex = remainingEntryIndex;
         }

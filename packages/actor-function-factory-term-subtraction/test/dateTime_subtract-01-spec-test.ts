@@ -1,12 +1,12 @@
 /* eslint max-len: 0 */
-import { runFuncTestTable } from '@comunica/bus-function-factory/test/util';
 import {
+  runFuncTestTable,
   dateTyped,
   dayTimeDurationTyped,
   dateTimeTyped,
   timeTyped,
-} from '@comunica/utils-expression-evaluator/test/util/Aliases';
-import { Notation } from '@comunica/utils-expression-evaluator/test/util/TestTable';
+  Notation,
+} from '@comunica/utils-jest';
 import { ActorFunctionFactoryTermSubtraction } from '../lib';
 
 describe('dateTime subtract', () => {
@@ -34,6 +34,23 @@ describe('dateTime subtract', () => {
         '${dateTimeTyped('2000-10-30T06:12:00-05:00')}' '${dateTimeTyped('1999-11-28T09:00:00Z')}' = '${dayTimeDurationTyped('P337DT2H12M')}'
         '${dateTyped('2000-10-30')}' '${dateTyped('1999-11-28')}' = '${dayTimeDurationTyped('P337D')}'
         '${timeTyped('11:12:00Z')}' '${timeTyped('04:00:00-05:00')}' = '${dayTimeDurationTyped('PT2H12M')}'
+      `,
+    });
+  });
+
+  describe('with fractional seconds and negative durations', () => {
+    runFuncTestTable({
+      registeredActors: [
+        args => new ActorFunctionFactoryTermSubtraction(args),
+      ],
+      operation: '-',
+      arity: 2,
+      notation: Notation.Infix,
+      testTable: `
+        '${dateTimeTyped('2012-07-20T20:24:21.582Z')}' '${dateTimeTyped('2012-07-18T10:01:00.000Z')}' = '${dayTimeDurationTyped('P2DT10H23M21.582S')}'
+        '${dateTimeTyped('1999-11-28T09:00:00Z')}' '${dateTimeTyped('2000-10-30T06:12:00-05:00')}' = '${dayTimeDurationTyped('-P337DT2H12M')}'
+        '${dateTimeTyped('2000-01-01T00:00:01.5Z')}' '${dateTimeTyped('2000-01-01T00:00:03Z')}' = '${dayTimeDurationTyped('-PT1.5S')}'
+        '${dateTimeTyped('2000-01-01T00:00:00Z')}' '${dateTimeTyped('2000-01-01T00:00:00Z')}' = '${dayTimeDurationTyped('PT0S')}'
       `,
     });
   });

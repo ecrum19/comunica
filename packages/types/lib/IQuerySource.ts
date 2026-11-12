@@ -1,8 +1,9 @@
+import type { Algebra, TypesComunica } from '@comunica/utils-algebra';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
-import type { Algebra } from 'sparqlalgebrajs';
-import type { BindingsStream } from './Bindings';
+import type { Bindings, BindingsStream } from './Bindings';
 import type { IActionContext } from './IActionContext';
+import type { ILink } from './ILink';
 import type { MetadataBindings } from './IMetadata';
 
 export interface IQuerySourceSerialized extends IQuerySourceUnidentifiedExpanded {
@@ -10,6 +11,7 @@ export interface IQuerySourceSerialized extends IQuerySourceUnidentifiedExpanded
   value: string;
   mediaType: string;
   baseIRI?: string;
+  version?: string;
 }
 
 export interface IQuerySourceUnidentifiedExpanded {
@@ -24,9 +26,26 @@ export interface IQuerySourceUnidentifiedExpandedRawContext {
   context?: Record<string, any>;
 }
 
-export type QuerySourceUnidentifiedExpanded = IQuerySourceUnidentifiedExpanded | IQuerySourceSerialized;
+export interface IQuerySourceTraverse {
+  type: 'traverse';
+  value: ILink[];
+  context?: IActionContext | Record<string, any>;
+}
+
+/**
+ * A composite file source that combines multiple file URLs or sources into a single queryable source.
+ * All files are loaded and merged into one in-memory RDF store before querying.
+ */
+export interface IQuerySourceCompositeFile {
+  type: 'compositefile';
+  value: (string | IQuerySourceWrapper)[];
+  context?: IActionContext;
+}
+
+export type QuerySourceUnidentifiedExpanded =
+  IQuerySourceUnidentifiedExpanded | IQuerySourceSerialized | IQuerySourceCompositeFile;
 export type QuerySourceUnidentified = string | RDF.Source | RDF.Store | RDF.DatasetCore |
-QuerySourceUnidentifiedExpanded | IQuerySourceUnidentifiedExpandedRawContext;
+QuerySourceUnidentifiedExpanded | IQuerySourceUnidentifiedExpandedRawContext | IQuerySourceTraverse;
 
 /**
  * Attaches a context to a query target.
@@ -46,6 +65,16 @@ export interface IQuerySource {
    * The URL of RDF source of this source.
    */
   referenceValue: QuerySourceReference;
+
+  /**
+   * @return A value from 0 to 1 indicating to what respect a source type is
+   * able to pre-filter the source based on the pattern.
+   * 1 indicates that the source can apply the whole pattern,
+   * and 0 indicates that the source can not apply the pattern at all (and local filtering must happen).
+   * Plain RDF documents for example have a filter factor of 0,
+   * while SPARQL endpoints have a filter factor of 1.
+   */
+  getFilterFactor: (context: IActionContext) => Promise<number>;
 
   /**
    * Get the selector type that is supported by this source.
@@ -77,6 +106,29 @@ export interface IQuerySource {
     context: IActionContext,
     options?: IQueryBindingsOptions,
   ) => BindingsStream;
+
+  /**
+   * Synchronously returns all bindings of the given operation.
+   *
+   * This is optional, and only meant for sources that can answer lookups without I/O.
+   * When present, `synchronous` should be `true` in the selector shape, for the operations that can be passed here.
+   *
+   * @param {Algebra.Operation} operation The operation to evaluate.
+   * @param {IActionContext} context      The query context.
+   * @return The resulting bindings, or undefined if the operation can not be evaluated synchronously,
+   *         in which case `queryBindings` must be used instead.
+   */
+  queryBindingsSynchronous?: (
+    operation: Algebra.Operation,
+    context: IActionContext,
+  ) => Bindings[] | undefined;
+
+  /**
+   * If this source may currently return blank nodes.
+   * Sources that do not implement this, or that can not know it, must be assumed to return blank nodes.
+   * @return False if the source certainly returns no blank nodes, true otherwise.
+   */
+  canContainBlankNodes?: () => boolean;
 
   /**
    * Returns a (possibly lazy) stream that returns all quads matching the operation.
@@ -119,7 +171,7 @@ export interface IQuerySource {
    * @return {Promise<boolean>}           The void response.
    */
   queryVoid: (
-    operation: Algebra.Update,
+    operation: Algebra.Operation,
     context: IActionContext,
   ) => Promise<void>;
 
@@ -160,13 +212,13 @@ export type FragmentSelectorShape = {
    */
   operation: {
     operationType: 'type';
-    type: Algebra.types;
+    type: Algebra.Types | TypesComunica;
   } | {
     operationType: 'pattern';
     pattern: Algebra.Operation;
   } | {
     operationType: 'type';
-    type: Algebra.types.EXPRESSION;
+    type: Algebra.Types.EXPRESSION;
     /**
      * The extension functions this source supports.
      */
@@ -176,6 +228,7 @@ export type FragmentSelectorShape = {
      * All possible operations are accepted by this shape.
      * As exception, extension functions are not accepted through wildcards, and must be
      * explicitly listed via `extensionFunctions`.
+     * Neither are Comunica's internal operations (`TypesComunica`), which must be explicitly listed by type.
      */
     operationType: 'wildcard';
   };
@@ -193,6 +246,7 @@ export type FragmentSelectorShape = {
   variablesOptional?: RDF.Variable[];
   /**
    * Children of this operation.
+   * If this field is not set, then all operations defined at the top level of the shape are allowed as children.
    */
   children?: FragmentSelectorShape[];
   /**
@@ -203,6 +257,10 @@ export type FragmentSelectorShape = {
    * If bindings can be passed into the source as a filter.
    */
   filterBindings?: true;
+  /**
+   * If operations of this shape can be passed to `queryBindingsSynchronous`.
+   */
+  synchronous?: true;
 } | {
   type: 'conjunction';
   children: FragmentSelectorShape[];
@@ -259,23 +317,23 @@ export type FragmentSelectorShape = {
 //   children: [
 //     {
 //       type: 'operation',
-//       operation: { type: Algebra.types.PROJECT },
+//       operation: { type: Algebra.Types.PROJECT },
 //     },
 //     {
 //       type: 'operation',
-//       operation: { type: Algebra.types.CONSTRUCT },
+//       operation: { type: Algebra.Types.CONSTRUCT },
 //     },
 //     {
 //       type: 'operation',
-//       operation: { type: Algebra.types.DESCRIBE },
+//       operation: { type: Algebra.Types.DESCRIBE },
 //     },
 //     {
 //       type: 'operation',
-//       operation: { type: Algebra.types.ASK },
+//       operation: { type: Algebra.Types.ASK },
 //     },
 //     {
 //       type: 'operation',
-//       operation: { type: Algebra.types.COMPOSITE_UPDATE },
+//       operation: { type: Algebra.Types.COMPOSITE_UPDATE },
 //     },
 //   ],
 // };
@@ -284,7 +342,7 @@ export type FragmentSelectorShape = {
 // //   Find ?s matching "?s dbo:country dbr:norway. ?s dbo:award ?o2. ?s dbo:birthDate ?o3."
 // const shapeSpf: FragmentSelectorShape = {
 //   type: 'operation',
-//   operation: { type: Algebra.types.BGP },
+//   operation: { type: Algebra.Types.BGP },
 //   scopedVariables: [
 //     DF.variable('s'),
 //   ],
@@ -324,7 +382,7 @@ export type FragmentSelectorShape = {
 //     },
 //     {
 //       type: 'operation',
-//       operation: { type: Algebra.types.BGP },
+//       operation: { type: Algebra.Types.BGP },
 //       children: [
 //         {
 //           type: 'arity',

@@ -1,115 +1,177 @@
-import type { ActorHttpInvalidateListenable, IActionHttpInvalidate } from '@comunica/bus-http-invalidate';
 import type { MediatorMergeBindingsContext } from '@comunica/bus-merge-bindings-context';
 import type { IActorQueryOperationTypedMediatedArgs } from '@comunica/bus-query-operation';
 import { ActorQueryOperationTypedMediated } from '@comunica/bus-query-operation';
 import type { MediatorQuerySourceIdentify } from '@comunica/bus-query-source-identify';
-import { KeysInitQuery } from '@comunica/context-entries';
+import { KeysDereference, KeysHttp, KeysInitQuery, KeysQueryOperation } from '@comunica/context-entries';
 import type { IActorTest, TestResult } from '@comunica/core';
-import { failTest, passTestVoid } from '@comunica/core';
+import { ActionContext, failTest, passTestVoid } from '@comunica/core';
 import type {
   ComunicaDataFactory,
   IActionContext,
   IQueryOperationResult,
   IQueryOperationResultBindings,
-  IQuerySource,
   IQuerySourceWrapper,
 } from '@comunica/types';
+import { Algebra, algebraUtils, inScopeVariables } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { MetadataValidationState } from '@comunica/utils-metadata';
-import { assignOperationSource, getSafeBindings } from '@comunica/utils-query-operation';
+import {
+  assignOperationSource,
+  doesShapeAcceptOperationInContext,
+  getSafeBindings,
+  getServiceTargetCredentials,
+  getSourceSelectorShape,
+} from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
-import { SingletonIterator } from 'asynciterator';
-import { LRUCache } from 'lru-cache';
-import type { Algebra } from 'sparqlalgebrajs';
+import { SingletonIterator, TransformIterator } from 'asynciterator';
 
 /**
  * A comunica Service Query Operation Actor.
- * It unwraps the SERVICE operation and executes it on the given source.
+ * It handles SERVICE clauses that survive query optimization, which are those with a variable target,
+ * as the optimizer can not know that target before the variable has been bound.
+ * Such a clause is evaluated once a bind-join has materialized its target into an IRI.
  */
 export class ActorQueryOperationService extends ActorQueryOperationTypedMediated<Algebra.Service> {
   public readonly forceSparqlEndpoint: boolean;
   public readonly mediatorMergeBindingsContext: MediatorMergeBindingsContext;
   public readonly mediatorQuerySourceIdentify: MediatorQuerySourceIdentify;
 
-  // TODO: Remove the cache as unneeded when service clauses are rewritten into source-annotated operations.
-  // For further details, see https://github.com/comunica/comunica/issues/1537
-  private readonly cache?: LRUCache<string, IQuerySourceWrapper<IQuerySource>>;
-  public readonly httpInvalidator: ActorHttpInvalidateListenable;
-
   public constructor(args: IActorQueryOperationServiceArgs) {
-    super(args, 'service');
-    if (args.cacheSize && args.httpInvalidator && args.cacheSize > 0) {
-      this.cache = new LRUCache({ max: args.cacheSize });
-      args.httpInvalidator.addInvalidateListener((action: IActionHttpInvalidate) =>
-        this.handleHttpInvalidateEvent(action));
-    }
+    super(args, Algebra.Types.SERVICE);
+    this.forceSparqlEndpoint = args.forceSparqlEndpoint;
+    this.mediatorMergeBindingsContext = args.mediatorMergeBindingsContext;
+    this.mediatorQuerySourceIdentify = args.mediatorQuerySourceIdentify;
   }
 
   public async testOperation(operation: Algebra.Service, _context: IActionContext): Promise<TestResult<IActorTest>> {
-    if (operation.name.termType !== 'NamedNode') {
-      return failTest(`${this.name} can only query services by IRI, while a ${operation.name.termType} was given.`);
+    const termType: string = operation.name.termType;
+    if (termType !== 'NamedNode' && termType !== 'Variable') {
+      return failTest(`${this.name} can only query services by IRI or variable, while a ${termType} was given.`);
     }
     return passTestVoid();
   }
 
   public async runOperation(operation: Algebra.Service, context: IActionContext): Promise<IQueryOperationResult> {
-    // Identify the SERVICE target as query source
-    let querySource = this.cache?.get(operation.name.value);
-    if (!querySource) {
-      querySource = (await this.mediatorQuerySourceIdentify.mediate({
-        querySourceUnidentified: {
-          value: operation.name.value,
-          type: this.forceSparqlEndpoint ? 'sparql' : undefined,
-        },
-        context,
-      })).querySource;
-      this.cache?.set(operation.name.value, querySource);
+    // We replace variable targets with a placeholder that should be bound later in the bind-join.
+    if (operation.name.termType !== 'NamedNode') {
+      if (!context.get(KeysInitQuery.serviceAllowVariableTargets)) {
+        throw new Error(`SERVICE clauses with a variable target are not allowed by default, as they let the queried data determine what is dereferenced. Enable them via the serviceAllowVariableTargets context entry.`);
+      }
+      return this.unboundPlaceholder(operation, context);
     }
 
-    // Attach the source to the operation, and execute
-    let output: IQueryOperationResultBindings;
+    // Also handle IRIs, which can occur when variable targets are bound at a later stage.
     try {
-      output = getSafeBindings(await this.mediatorQueryOperation.mediate({
-        operation: assignOperationSource(operation.input, querySource),
+      const querySource = await this.identifyTarget(operation, operation.name, context);
+      const output = getSafeBindings(await this.mediatorQueryOperation.mediate({
+        operation: await this.assignSource(operation.input, querySource, context),
         context,
       }));
+      // Force resolution of the metadata, so that connection errors surface here instead of on the stream.
+      await output.metadata();
+      return output;
     } catch (error: unknown) {
-      if (operation.silent) {
-        // Emit a single empty binding
-        const dataFactory: ComunicaDataFactory = context.getSafe(KeysInitQuery.dataFactory);
-        const bindingsFactory = await BindingsFactory.create(
-          this.mediatorMergeBindingsContext,
-          context,
-          dataFactory,
-        );
-        output = {
-          bindingsStream: new SingletonIterator<RDF.Bindings>(bindingsFactory.bindings()),
-          type: 'bindings',
-          metadata: async() => ({
-            state: new MetadataValidationState(),
-            cardinality: { type: 'exact', value: 1 },
-            variables: [],
-          }),
-        };
-        this.logWarn(context, `An error occurred when executing a SERVICE clause: ${(<Error> error).message}`);
-      } else {
+      if (!operation.silent) {
         throw error;
       }
+      this.logWarn(context, `An error occurred when executing a SERVICE clause: ${(<Error> error).message}`);
+      return await this.emptySolution(context);
     }
-
-    return output;
   }
 
   /**
-   * Handles HTTP cache invalidation events.
-   * @param {IActionHttpInvalidate} action The invalidation action
+   * Identify the SERVICE target as a query source.
+   * This logic is similar to that in ActorOptimizeQueryOperationAssignSourcesExhaustive#assignExhaustive
    */
-  public handleHttpInvalidateEvent(action: IActionHttpInvalidate): void {
-    if (action.url) {
-      this.cache?.delete(action.url);
-    } else {
-      this.cache?.clear();
+  protected async identifyTarget(
+    operation: Algebra.Service,
+    target: RDF.NamedNode,
+    context: IActionContext,
+  ): Promise<IQuerySourceWrapper> {
+    // Unless explicitly allowed, SERVICE targets may not be dereferenced from the local file system,
+    // as queries from untrusted parties could otherwise read arbitrary local files.
+    let sourceContext = context.get(KeysInitQuery.serviceAllowFileTargets) ?
+      new ActionContext() :
+      new ActionContext().set(KeysDereference.blockFileAccess, true);
+    if (operation.silent) {
+      sourceContext = sourceContext
+        // Suppresses hard errors while dereferencing a SERVICE target that is a plain document.
+        .set(KeysInitQuery.lenient, true)
+        // Replaces errors from the source by a single empty solution.
+        .set(KeysQueryOperation.silent, true);
     }
+    const { url, auth } = getServiceTargetCredentials(target.value, context);
+    if (auth !== undefined) {
+      sourceContext = sourceContext.set(KeysHttp.auth, auth);
+    }
+    const { querySource } = await this.mediatorQuerySourceIdentify.mediate({
+      querySourceUnidentified: {
+        value: url,
+        type: this.forceSparqlEndpoint ? 'sparql' : undefined,
+        context: sourceContext,
+      },
+      context,
+    });
+    return querySource;
+  }
+
+  /**
+   * Annotate the given operation with the given source.
+   * The whole operation is annotated if the source accepts it (e.g. for SPARQL endpoints).
+   * Otherwise, only the leaves are annotated, so that the remainder is evaluated locally.
+   */
+  protected async assignSource(
+    operation: Algebra.Operation,
+    querySource: IQuerySourceWrapper,
+    context: IActionContext,
+  ): Promise<Algebra.Operation> {
+    const shape = await getSourceSelectorShape(querySource, context);
+    if (doesShapeAcceptOperationInContext(shape, operation, context)) {
+      return assignOperationSource(operation, querySource);
+    }
+    const leafHandler = {
+      preVisitor: () => ({ continue: <const> false }),
+      transform: (leafOp: Algebra.Operation) => assignOperationSource(leafOp, querySource),
+    };
+    return algebraUtils.mapOperation(operation, {
+      [Algebra.Types.PATTERN]: leafHandler,
+      [Algebra.Types.LINK]: leafHandler,
+      [Algebra.Types.NPS]: leafHandler,
+    });
+  }
+
+  protected unboundPlaceholder(operation: Algebra.Service, _context: IActionContext): IQueryOperationResultBindings {
+    const variables = [
+      ...inScopeVariables(operation.input),
+      <RDF.Variable> operation.name,
+    ].map(variable => ({ variable, canBeUndef: false }));
+    return {
+      type: 'bindings',
+      bindingsStream: new TransformIterator<RDF.Bindings>(() => Promise.reject(new Error(
+        `Tried to evaluate a SERVICE clause with unbound variable ?${operation.name.value}`,
+      )), { autoStart: false }),
+      metadata: async() => ({
+        state: new MetadataValidationState(),
+        cardinality: { type: 'estimate', value: Number.POSITIVE_INFINITY },
+        variables,
+        // Join actors must bind our target before this operation can be evaluated.
+        operationRequired: true,
+      }),
+    };
+  }
+
+  protected async emptySolution(context: IActionContext): Promise<IQueryOperationResultBindings> {
+    const dataFactory: ComunicaDataFactory = context.getSafe(KeysInitQuery.dataFactory);
+    const bindingsFactory = await BindingsFactory.create(this.mediatorMergeBindingsContext, context, dataFactory);
+    return {
+      bindingsStream: new SingletonIterator<RDF.Bindings>(bindingsFactory.bindings()),
+      type: 'bindings',
+      metadata: async() => ({
+        state: new MetadataValidationState(),
+        cardinality: { type: 'exact', value: 1 },
+        variables: [],
+      }),
+    };
   }
 }
 
@@ -127,17 +189,4 @@ export interface IActorQueryOperationServiceArgs extends IActorQueryOperationTyp
    * The mediator for identifying query sources.
    */
   mediatorQuerySourceIdentify: MediatorQuerySourceIdentify;
-  /* eslint-disable max-len */
-  /**
-   * An actor that listens to HTTP invalidation events
-   * @default {<default_invalidator> a <npmd:@comunica/bus-http-invalidate/^4.0.0/components/ActorHttpInvalidateListenable.jsonld#ActorHttpInvalidateListenable>}
-   * TODO: make required in next-major.
-   */
-  httpInvalidator?: ActorHttpInvalidateListenable;
-  /* eslint-enable max-len */
-  /**
-   * The cache size for sources, to mitigate the overhead of multiple identifications for the same source.
-   * @default {32}
-   */
-  cacheSize?: number;
 }

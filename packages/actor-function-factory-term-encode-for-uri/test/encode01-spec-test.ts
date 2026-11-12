@@ -1,6 +1,8 @@
-import { runFuncTestTable } from '@comunica/bus-function-factory/test/util';
-import * as Data from '@comunica/utils-expression-evaluator/test/spec/_data';
-import { Notation } from '@comunica/utils-expression-evaluator/test/util/TestTable';
+import {
+  runFuncTestTable,
+  EvalTestData as Data,
+  Notation,
+} from '@comunica/utils-jest';
 import { ActorFunctionFactoryTermEncodeForUri } from '../lib';
 
 /**
@@ -28,7 +30,7 @@ import { ActorFunctionFactoryTermEncodeForUri } from '../lib';
  */
 
 describe('We should respect the encode01 spec', () => {
-  const { s1, s2, s3, s4, s5, s6, s7 } = Data.data();
+  const { s1, s2, s3, s4, s5, s6, s7 } = Data.data;
   runFuncTestTable({
     registeredActors: [
       args => new ActorFunctionFactoryTermEncodeForUri(args),
@@ -44,6 +46,27 @@ describe('We should respect the encode01 spec', () => {
     '${s5}' = "100%25"
     '${s6}' = "abc"^^xsd:string
     '${s7}' = "DEF"^^xsd:string
+    `,
+  });
+});
+
+describe('ENCODE_FOR_URI like fn:encode-for-uri', () => {
+  runFuncTestTable({
+    registeredActors: [
+      args => new ActorFunctionFactoryTermEncodeForUri(args),
+    ],
+    notation: Notation.Function,
+    operation: 'ENCODE_FOR_URI',
+    arity: 1,
+    testTable: `
+    '"a b/ü~"' = "a%20b%2F%C3%BC~"
+    "AZaz09-_.~" = "AZaz09-_.~"
+    ":/?#[]@" = "%3A%2F%3F%23%5B%5D%40"
+    "!$&()*+,;=" = "%21%24%26%28%29%2A%2B%2C%3B%3D"
+    "http://www.example.com/00/Weather/CA/Los%20Angeles#ocean" = "http%3A%2F%2Fwww.example.com%2F00%2FWeather%2FCA%2FLos%2520Angeles%23ocean"
+    "~bébé" = "~b%C3%A9b%C3%A9"
+    '"100% organic"' = "100%25%20organic"
+    '"Los Angeles"@en' = "Los%20Angeles"
     `,
   });
 });

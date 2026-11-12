@@ -1,11 +1,11 @@
 import type { MediatorQueryOperation } from '@comunica/bus-query-operation';
 import type { IActionContext } from '@comunica/types';
+import type { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { getSafeBindings } from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
 import { BufferedIterator } from 'asynciterator';
 import { termToString } from 'rdf-string';
-import type { Algebra, Factory } from 'sparqlalgebrajs';
 
 /**
  * An iterator that implements the multi-length property path operation (* and +)
@@ -16,11 +16,13 @@ export class PathVariableObjectIterator extends BufferedIterator<RDF.Term> {
   private readonly runningOperations: AsyncIterator<RDF.Term>[] = [];
   private readonly pendingOperations: { variable: RDF.Variable; operation: Algebra.Path }[] = [];
   private started = false;
+  // Set when a running operation changes state during a pending _read, as _fillBufferAsync is a no-op then
+  private missedStateChange = false;
 
   public constructor(
-    private readonly algebraFactory: Factory,
+    private readonly algebraFactory: AlgebraFactory,
     private readonly subject: RDF.Term,
-    private readonly predicate: Algebra.PropertyPathSymbol,
+    private readonly predicate: Algebra.Operation,
     private readonly graph: RDF.Term,
     private readonly context: IActionContext,
     private readonly mediatorQueryOperation: MediatorQueryOperation,
@@ -87,23 +89,23 @@ export class PathVariableObjectIterator extends BufferedIterator<RDF.Term> {
       bindings => <RDF.Term> bindings.get(pendingOperation.variable),
     );
 
-    if (!runningOperation.done) {
-      this.runningOperations.push(runningOperation);
-      runningOperation.on('error', error => this.destroy(error));
-      runningOperation.on('readable', () => {
-        if (fillBuffer) {
-          this._fillBufferAsync();
-        }
-        this.readable = true;
-      });
-      runningOperation.on('end', () => {
-        this.runningOperations.splice(this.runningOperations.indexOf(runningOperation), 1);
-        if (fillBuffer) {
-          this._fillBufferAsync();
-        }
-        this.readable = true;
-      });
-    }
+    this.runningOperations.push(runningOperation);
+    runningOperation.on('error', error => this.destroy(error));
+    runningOperation.on('readable', () => {
+      this.markStateChangeIfReading();
+      if (fillBuffer) {
+        this._fillBufferAsync();
+      }
+      this.readable = true;
+    });
+    runningOperation.on('end', () => {
+      this.runningOperations.splice(this.runningOperations.indexOf(runningOperation), 1);
+      this.markStateChangeIfReading();
+      if (fillBuffer) {
+        this._fillBufferAsync();
+      }
+      this.readable = true;
+    });
 
     if (!this.getProperty('metadata')) {
       this.setProperty('metadata', results.metadata);
@@ -146,7 +148,18 @@ export class PathVariableObjectIterator extends BufferedIterator<RDF.Term> {
       self.closeIfNeeded();
     })().then(() => {
       done();
+      // Re-read if a running operation became readable or ended after we checked it
+      if (self.missedStateChange) {
+        self.missedStateChange = false;
+        self._fillBufferAsync();
+      }
     }, error => this.destroy(error));
+  }
+
+  protected markStateChangeIfReading(): void {
+    if (this._reading) {
+      this.missedStateChange = true;
+    }
   }
 
   protected closeIfNeeded(): void {

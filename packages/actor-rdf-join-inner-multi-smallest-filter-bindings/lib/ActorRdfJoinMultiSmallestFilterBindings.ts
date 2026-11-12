@@ -19,13 +19,18 @@ import type {
   IJoinEntryWithMetadata,
   IQuerySourceWrapper,
 } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import { bindingsToString } from '@comunica/utils-bindings-factory';
 import { ChunkedIterator } from '@comunica/utils-iterator';
-import { doesShapeAcceptOperation, getOperationSource, getSafeBindings } from '@comunica/utils-query-operation';
+import {
+  doesShapeAcceptOperationInContext,
+  getOperationSource,
+  getSafeBindings,
+  getSourceSelectorShape,
+} from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
 import { UnionIterator } from 'asynciterator';
-import { Factory } from 'sparqlalgebrajs';
 
 /**
  * A comunica Inner Multi Smallest Filter Bindings RDF Join Actor.
@@ -40,10 +45,14 @@ export class ActorRdfJoinMultiSmallestFilterBindings extends ActorRdfJoin {
     super(args, {
       logicalType: 'inner',
       physicalName: 'multi-smallest-filter-bindings',
+      pushesBindingsToSource: true,
       limitEntries: 2,
       limitEntriesMin: true,
-      isLeaf: false,
     });
+    this.selectivityModifier = args.selectivityModifier;
+    this.blockSize = args.blockSize;
+    this.mediatorJoinEntriesSort = args.mediatorJoinEntriesSort;
+    this.mediatorJoin = args.mediatorJoin;
   }
 
   /**
@@ -104,7 +113,7 @@ export class ActorRdfJoinMultiSmallestFilterBindings extends ActorRdfJoin {
 
   public async getOutput(action: IActionRdfJoin): Promise<IActorRdfJoinOutputInner> {
     const dataFactory: ComunicaDataFactory = action.context.getSafe(KeysInitQuery.dataFactory);
-    const algebraFactory = new Factory(dataFactory);
+    const algebraFactory = new AlgebraFactory(dataFactory);
 
     // Determine the two smallest streams by sorting (e.g. via cardinality)
     const entriesUnsorted = await ActorRdfJoin.getEntriesWithMetadatas([ ...action.entries ]);
@@ -144,7 +153,7 @@ export class ActorRdfJoinMultiSmallestFilterBindings extends ActorRdfJoin {
       secondIn.operation,
       sourceWrapper.context ? action.context.merge(sourceWrapper.context) : action.context,
       { filterBindings: { bindings: chunk, metadata: first.metadata }},
-    )));
+    )), { autoStart: false });
     const second: IJoinEntry = {
       output: {
         type: 'bindings',
@@ -213,12 +222,8 @@ export class ActorRdfJoinMultiSmallestFilterBindings extends ActorRdfJoin {
       return failTest(`Actor ${this.name} can only process if entries[1] has a source`);
     }
     const testingOperation = second.operation;
-    const selectorShape = await sourceWrapper.source.getSelectorShape(action.context);
-    const wildcardAcceptAllExtensionFunctions = action.context.get(KeysInitQuery.extensionFunctionsAlwaysPushdown);
-    if (!doesShapeAcceptOperation(selectorShape, testingOperation, {
-      filterBindings: true,
-      wildcardAcceptAllExtensionFunctions,
-    })) {
+    const selectorShape = await getSourceSelectorShape(sourceWrapper, action.context);
+    if (!doesShapeAcceptOperationInContext(selectorShape, testingOperation, action.context, { filterBindings: true })) {
       return failTest(`Actor ${this.name} can only process if entries[1] accept filterBindings`);
     }
 

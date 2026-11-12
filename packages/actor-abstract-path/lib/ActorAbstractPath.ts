@@ -13,8 +13,15 @@ import type {
   IQuerySourceWrapper,
   ComunicaDataFactory,
 } from '@comunica/types';
+import { Algebra, isKnownOperation } from '@comunica/utils-algebra';
+import type { AlgebraFactory } from '@comunica/utils-algebra';
 import type { BindingsFactory } from '@comunica/utils-bindings-factory';
-import { assignOperationSource, getOperationSource, getSafeBindings } from '@comunica/utils-query-operation';
+import {
+  assignOperationSource,
+  getOperationSource,
+  getSafeBindings,
+  groupRepeatedSubOperations,
+} from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
 import {
@@ -24,8 +31,6 @@ import {
   EmptyIterator,
 } from 'asynciterator';
 import { termToString } from 'rdf-string';
-import type { Factory } from 'sparqlalgebrajs';
-import { Algebra } from 'sparqlalgebrajs';
 import { PathVariableObjectIterator } from './PathVariableObjectIterator';
 
 /**
@@ -56,7 +61,7 @@ export abstract class ActorAbstractPath extends ActorQueryOperationTypedMediated
     }
 
     // Path predicates can't contain variables
-    if (path && (path.subject.value === name || path.object.value === name)) {
+    if (path && (path.subject.value === name || path.object.value === name || path.graph.value === name)) {
       return this.generateVariable(dataFactory, path, `${name}b`);
     }
 
@@ -66,8 +71,11 @@ export abstract class ActorAbstractPath extends ActorQueryOperationTypedMediated
   // Such connectivity matching does not introduce duplicates (it does not incorporate any count of the number
   // of ways the connection can be made) even if the repeated path itself would otherwise result in duplicates.
   // https://www.w3.org/TR/sparql11-query/#propertypaths
-  public async isPathArbitraryLengthDistinct(algebraFactory: Factory, context: IActionContext, path: Algebra.Path):
-  Promise<{ context: IActionContext; operation: IQueryOperationResultBindings | undefined }> {
+  public async isPathArbitraryLengthDistinct(
+    algebraFactory: AlgebraFactory,
+    context: IActionContext,
+    path: Algebra.Path,
+  ): Promise<{ context: IActionContext; operation: IQueryOperationResultBindings | undefined }> {
     if (!context.get(KeysQueryOperation.isPathArbitraryLengthDistinctKey)) {
       context = context.set(KeysQueryOperation.isPathArbitraryLengthDistinctKey, true);
       return { context, operation: getSafeBindings(await this.mediatorQueryOperation.mediate({
@@ -80,13 +88,34 @@ export abstract class ActorAbstractPath extends ActorQueryOperationTypedMediated
     return { context, operation: undefined };
   }
 
+  public async getNodes(
+    operation: Algebra.Path,
+    context: IActionContext,
+    algebraFactory: AlgebraFactory,
+    sources: IQuerySourceWrapper[],
+  ): Promise<IQueryOperationResultBindings> {
+    const result = getSafeBindings(
+      await this.mediatorQueryOperation.mediate({
+        context,
+        operation: this.assignPatternSources(
+          algebraFactory,
+          algebraFactory.createNodes(operation.graph, <RDF.Variable> operation.subject),
+          sources,
+        ),
+      }),
+    );
+    result.bindingsStream = result.bindingsStream.map(bindings => bindings
+      .set(<RDF.Variable> operation.object, bindings.get(<RDF.Variable> operation.subject)!));
+    return result;
+  }
+
   private async predicateStarGraphVariable(
     subject: RDF.Term,
     object: RDF.Variable,
-    predicate: Algebra.PropertyPathSymbol,
+    predicate: Algebra.Operation,
     graph: RDF.Variable,
     context: IActionContext,
-    algebraFactory: Factory,
+    algebraFactory: AlgebraFactory,
     bindingsFactory: BindingsFactory,
   ): Promise<IPathResultStream> {
     const sources = this.getPathSources(predicate);
@@ -124,7 +153,7 @@ export abstract class ActorAbstractPath extends ActorQueryOperationTypedMediated
                 [ graph, graphValue ],
               ]));
             },
-            { maxBufferSize: 128 },
+            { maxBufferSize: 128, autoStart: false },
           );
         },
         autoStart: false,
@@ -152,14 +181,18 @@ export abstract class ActorAbstractPath extends ActorQueryOperationTypedMediated
    */
   public async getObjectsPredicateStarEval(
     subject: RDF.Term,
-    predicate: Algebra.PropertyPathSymbol,
+    predicate: Algebra.Operation,
     object: RDF.Variable,
     graph: RDF.Term,
     context: IActionContext,
     emitFirstSubject: boolean,
-    algebraFactory: Factory,
+    algebraFactory: AlgebraFactory,
     bindingsFactory: BindingsFactory,
   ): Promise<IPathResultStream> {
+    // The path is walked by evaluating one sub-path per reached term,
+    // so group those evaluations in the physical query plan
+    context = groupRepeatedSubOperations(context, 'alp', this.name);
+
     if (graph.termType === 'Variable') {
       return this
         .predicateStarGraphVariable(subject, object, predicate, graph, context, algebraFactory, bindingsFactory);
@@ -204,9 +237,9 @@ export abstract class ActorAbstractPath extends ActorQueryOperationTypedMediated
    * @return {Promise<IPathResultStream['metadata']>} The results metadata.
    */
   public async getObjectsPredicateStar(
-    algebraFactory: Factory,
+    algebraFactory: AlgebraFactory,
     object: RDF.Term,
-    predicate: Algebra.PropertyPathSymbol,
+    predicate: Algebra.Operation,
     graph: RDF.Term,
     context: IActionContext,
     termHashes: Record<string, RDF.Term>,
@@ -269,14 +302,14 @@ export abstract class ActorAbstractPath extends ActorQueryOperationTypedMediated
     objectVar: RDF.Variable,
     subjectVal: RDF.Term,
     objectVal: RDF.Term,
-    predicate: Algebra.PropertyPathSymbol,
+    predicate: Algebra.Operation,
     graph: RDF.Term,
     context: IActionContext,
     termHashesGlobal: Record<string, Promise<RDF.Term[]>>,
     termHashesCurrentSubject: Record<string, boolean>,
     it: BufferedIterator<Bindings>,
     counter: any,
-    algebraFactory: Factory,
+    algebraFactory: AlgebraFactory,
     bindingsFactory: BindingsFactory,
   ): Promise<void> {
     const termString = termToString(objectVal) + termToString(graph);
@@ -372,31 +405,28 @@ export abstract class ActorAbstractPath extends ActorQueryOperationTypedMediated
    * Find all sources recursively contained in the given path operation.
    * @param operation
    */
-  public getPathSources(operation: Algebra.PropertyPathSymbol): IQuerySourceWrapper[] {
-    switch (operation.type) {
-      case Algebra.types.ALT:
-      case Algebra.types.SEQ:
-        return operation.input
-          .flatMap((subOp: Algebra.PropertyPathSymbol) => this.getPathSources(subOp));
-      case Algebra.types.INV:
-      case Algebra.types.ONE_OR_MORE_PATH:
-      case Algebra.types.ZERO_OR_MORE_PATH:
-      case Algebra.types.ZERO_OR_ONE_PATH:
-        return this.getPathSources(operation.path);
-      case Algebra.types.LINK:
-      case Algebra.types.NPS: {
-        const source = getOperationSource(operation);
-        if (!source) {
-          throw new Error(`Could not find a required source on a link path operation`);
-        }
-        return [ source ];
-      }
+  public getPathSources(operation: Algebra.Operation): IQuerySourceWrapper[] {
+    if (isKnownOperation(operation, Algebra.Types.ALT) || isKnownOperation(operation, Algebra.Types.SEQ)) {
+      return operation.input.flatMap(subOp => this.getPathSources(subOp));
     }
+    if (isKnownOperation(operation, Algebra.Types.INV) || isKnownOperation(operation, Algebra.Types.ONE_OR_MORE_PATH) ||
+      isKnownOperation(operation, Algebra.Types.ZERO_OR_MORE_PATH) ||
+      isKnownOperation(operation, Algebra.Types.ZERO_OR_ONE_PATH)) {
+      return this.getPathSources(operation.path);
+    }
+    if (isKnownOperation(operation, Algebra.Types.LINK) || isKnownOperation(operation, Algebra.Types.NPS)) {
+      const source = getOperationSource(operation);
+      if (!source) {
+        throw new Error(`Could not find a required source on a link path operation`);
+      }
+      return [ source ];
+    }
+    throw new Error(`Can not extract path sources from operation of type ${operation.type}`);
   }
 
   public assignPatternSources(
-    algebraFactory: Factory,
-    pattern: Algebra.Pattern,
+    algebraFactory: AlgebraFactory,
+    pattern: Algebra.Operation,
     sources: IQuerySourceWrapper[],
   ): Algebra.Operation {
     if (sources.length === 0) {

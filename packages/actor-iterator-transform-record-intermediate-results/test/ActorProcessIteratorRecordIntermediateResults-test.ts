@@ -5,12 +5,12 @@ import type {
 import { KeysStatistics } from '@comunica/context-entries';
 import { ActionContext, Bus, failTest, passTestVoid } from '@comunica/core';
 import { StatisticIntermediateResults } from '@comunica/statistic-intermediate-results';
+import { Algebra } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { MetadataValidationState } from '@comunica/utils-metadata';
 import type * as RDF from '@rdfjs/types';
 import { ArrayIterator, MappingIterator } from 'asynciterator';
 import { DataFactory } from 'rdf-data-factory';
-import { types } from 'sparqlalgebrajs/lib/algebra';
 import { ActorIteratorTransformRecordIntermediateResults }
   from '../lib/ActorIteratorTransformRecordIntermediateResults';
 
@@ -52,17 +52,17 @@ describe('ActorIteratorTransformRecordIntermediateResults', () => {
             [ DF.variable('a'), DF.literal('a1') ],
             [ DF.variable('c'), DF.literal('c1') ],
           ]),
-        ]),
+        ], { autoStart: false }),
         metadata,
         context: new ActionContext(),
         originalAction: { context: new ActionContext() },
       };
       actionQuads = {
         type: 'quads',
-        operation: types.CONSTRUCT,
+        operation: Algebra.Types.CONSTRUCT,
         stream: new ArrayIterator<RDF.Quad>([
           DF.quad(DF.namedNode('s1'), DF.namedNode('p1'), DF.namedNode('o1'), DF.namedNode('g1')),
-        ]),
+        ], { autoStart: false }),
         metadata,
         context: new ActionContext(),
         originalAction: { context: new ActionContext() },
@@ -115,7 +115,7 @@ describe('ActorIteratorTransformRecordIntermediateResults', () => {
             type: 'quads',
             data: DF.quad(DF.namedNode('s1'), DF.namedNode('p1'), DF.namedNode('o1'), DF.namedNode('g1')),
             metadata: {
-              operation: types.CONSTRUCT,
+              operation: Algebra.Types.CONSTRUCT,
               metadata: expect.any(Function),
               time: performance.now(),
             },

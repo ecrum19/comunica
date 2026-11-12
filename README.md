@@ -67,6 +67,7 @@ Or jump right into one of the available query engines:
    * [Comunica SPARQL RDF/JS Lite](https://github.com/comunica/comunica/tree/master/engines/query-sparql-rdfjs-lite#readme): Engine optimized for small bundle size to query over in-memory [RDF/JS-compliant sources](https://rdf.js.org/stream-spec/#source-interface).
    * [Comunica SPARQL HDT](https://github.com/comunica/comunica-feature-hdt/tree/master/engines/query-sparql-hdt#readme): Library to query over local [HDT](https://www.rdfhdt.org/) files
    * [Comunica SPARQL OSTRICH](https://github.com/comunica/comunica-feature-versioning/tree/master/engines/query-sparql-ostrich#readme): Library to query over local versioned [OSTRICH](https://github.com/rdfostrich/ostrich) archives
+   * [Comunica MCP](https://github.com/comunica/comunica-feature-mcp/): [MCP](https://modelcontextprotocol.io/) wrappers over most Comunica engines for interaction with AI agents.
 
  - Engines with alternative querying paradigms:
    * [Comunica SPARQL Link Traversal](https://github.com/comunica/comunica-feature-link-traversal/tree/master/engines/query-sparql-link-traversal#readme): Engine to query over multiple files by following links between them.
@@ -74,6 +75,9 @@ Or jump right into one of the available query engines:
    * [Comunica SPARQL Link Traversal Solid](https://github.com/comunica/comunica-feature-link-traversal/tree/master/engines/query-sparql-link-traversal-solid#readme): Engine to query within [Solid data vaults](https://solidproject.org/) by following links between documents.
    * [Comunica SPARQL Reasoning](https://github.com/comunica/comunica-feature-reasoning/tree/master/engines/query-sparql-reasoning): Engine that adds support for reasoning
    * [Comunica SPARQL Reasoning File](https://github.com/comunica/comunica-feature-reasoning/tree/master/engines/query-sparql-file-reasoning): Engine to query over local RDF files with support for reasoning
+
+ - Engines that expose a part of Comunica on their own:
+   * [Comunica SPARQL Expressions](https://github.com/comunica/comunica/tree/master/engines/expressions-sparql#readme): Engine to evaluate SPARQL expressions, aggregates and term ordering without querying.
 
 ## Modify or Extend Comunica
 

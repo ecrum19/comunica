@@ -26,7 +26,7 @@ describe('ActorQueryOperationDistinctHash', () => {
           BF.bindings([[ DF.variable('a'), DF.literal('1') ]]),
           BF.bindings([[ DF.variable('a'), DF.literal('3') ]]),
           BF.bindings([[ DF.variable('a'), DF.literal('2') ]]),
-        ]),
+        ], { autoStart: false }),
         metadata: () => Promise.resolve({ cardinality: 5, variables: [ DF.variable('a') ]}),
         operated: arg,
         type: 'bindings',
@@ -50,14 +50,14 @@ describe('ActorQueryOperationDistinctHash', () => {
             DF.namedNode('p'),
             DF.namedNode('o'),
           ),
-        ]),
+        ], { autoStart: false }),
         metadata: () => Promise.resolve({ cardinality: 3 }),
         operated: arg,
         type: 'quads',
       }),
     };
     mediatorHashBindings = {
-      mediate: () => Promise.resolve({ hashFunction: (bindings: any) => JSON.stringify(bindings) }),
+      mediate: () => Promise.resolve({ hashFunction: (bindings: any) => bindings.toString() }),
     };
     mediatorHashQuads = {
       mediate: () => Promise.resolve({ hashFunction: (bindings: any) => JSON.stringify(bindings) }),

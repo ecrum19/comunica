@@ -11,7 +11,7 @@ export class CliArgsHandlerHttp implements ICliArgsHandler {
       .example([
         [ `$0 https://fragments.dbpedia.org/2016-04/en`, '' ],
         [ `$0 https://fragments.dbpedia.org/2016-04/en https://query.wikidata.org/sparql`, '' ],
-        [ `$0 hypermedia@https://fragments.dbpedia.org/2016-04/en sparql@https://query.wikidata.org/sparql`, '' ],
+        [ `$0 qpf@https://fragments.dbpedia.org/2016-04/en sparql@https://query.wikidata.org/sparql`, '' ],
       ])
       .options({
         port: {
@@ -57,6 +57,15 @@ export class CliArgsHandlerHttp implements ICliArgsHandler {
         emitVoid: {
           type: 'boolean',
           describe: 'Generate VoID descriptions and include them in the service description',
+        },
+        warmup: {
+          type: 'number',
+          describe: 'Number of warmup queries a worker warms up with before it accepts requests',
+          default: 0,
+        },
+        graphStore: {
+          type: 'boolean',
+          describe: 'Expose the SPARQL Graph Store HTTP Protocol, which reads and writes whole RDF graphs',
         },
       })
       .check((args) => {

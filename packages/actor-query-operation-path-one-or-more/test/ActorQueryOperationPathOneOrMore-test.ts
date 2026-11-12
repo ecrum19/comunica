@@ -1,6 +1,7 @@
 import { ActorQueryOperation } from '@comunica/bus-query-operation';
 import { KeysInitQuery, KeysQueryOperation } from '@comunica/context-entries';
 import { Bus, ActionContext } from '@comunica/core';
+import { Algebra, AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import type { Bindings } from '@comunica/utils-bindings-factory';
 import { assignOperationSource, getSafeBindings } from '@comunica/utils-query-operation';
@@ -8,7 +9,6 @@ import type * as RDF from '@rdfjs/types';
 import { ArrayIterator } from 'asynciterator';
 import { DataFactory } from 'rdf-data-factory';
 import { QUAD_TERM_NAMES } from 'rdf-terms';
-import { Algebra, Factory } from 'sparqlalgebrajs';
 import { ActorQueryOperationPathOneOrMore } from '../lib/ActorQueryOperationPathOneOrMore';
 import '@comunica/utils-jest';
 
@@ -18,7 +18,7 @@ const BF = new BindingsFactory(DF, {});
 describe('ActorQueryOperationPathOneOrMore', () => {
   let bus: any;
   let mediatorQueryOperation: any;
-  const factory: Factory = new Factory();
+  const factory: AlgebraFactory = new AlgebraFactory();
 
   beforeEach(() => {
     bus = new Bus({ name: 'bus' });
@@ -115,12 +115,12 @@ describe('ActorQueryOperationPathOneOrMore', () => {
     });
 
     it('should test on OneOrMore paths', async() => {
-      const op: any = { operation: { type: Algebra.types.PATH, predicate: { type: Algebra.types.ONE_OR_MORE_PATH }}};
+      const op: any = { operation: { type: Algebra.Types.PATH, predicate: { type: Algebra.Types.ONE_OR_MORE_PATH }}};
       await expect(actor.test(op)).resolves.toPassTestVoid();
     });
 
     it('should test on different paths', async() => {
-      const op: any = { operation: { type: Algebra.types.PATH, predicate: { type: 'dummy' }}};
+      const op: any = { operation: { type: Algebra.Types.PATH, predicate: { type: 'dummy' }}};
       await expect(actor.test(op)).resolves.toFailTest(`This Actor only supports OneOrMorePath Path operations.`);
     });
 
@@ -322,6 +322,107 @@ describe('ActorQueryOperationPathOneOrMore', () => {
           [ DF.variable('g'), DF.namedNode('8') ],
         ]),
       ]);
+    });
+
+    describe('with the same variable as subject and object', () => {
+      let operations: any[];
+      let bindings: Bindings[];
+
+      beforeEach(() => {
+        operations = [];
+        actor = new ActorQueryOperationPathOneOrMore({
+          name: 'actor',
+          bus,
+          mediatorQueryOperation: <any> {
+            async mediate(arg: any) {
+              operations.push(arg.operation);
+              const variables = [ arg.operation.subject, arg.operation.object, arg.operation.graph ]
+                .filter(term => term.termType === 'Variable')
+                .map(variable => ({ variable, canBeUndef: false }));
+              return {
+                type: 'bindings',
+                bindingsStream: new ArrayIterator(bindings, { autoStart: false }),
+                metadata: async() => ({ cardinality: { type: 'estimate', value: bindings.length }, variables }),
+              };
+            },
+          },
+          mediatorMergeBindingsContext,
+        });
+      });
+
+      it('should only keep the subjects that reach themselves (?x :p+ ?x)', async() => {
+        bindings = [
+          BF.bindings([[ DF.variable('x'), DF.namedNode('1') ], [ DF.variable('b'), DF.namedNode('1') ]]),
+          BF.bindings([[ DF.variable('x'), DF.namedNode('1') ], [ DF.variable('b'), DF.namedNode('2') ]]),
+          BF.bindings([[ DF.variable('x'), DF.namedNode('2') ], [ DF.variable('b'), DF.namedNode('3') ]]),
+          BF.bindings([[ DF.variable('x'), DF.namedNode('3') ], [ DF.variable('b'), DF.namedNode('3') ]]),
+        ];
+        const predicate = factory.createOneOrMorePath(factory.createLink(DF.namedNode('p')));
+        const op: any = { operation: factory.createPath(
+          DF.variable('x'),
+          predicate,
+          DF.variable('x'),
+        ), context: new ActionContext({
+          [KeysInitQuery.dataFactory.name]: DF,
+          [KeysQueryOperation.isPathArbitraryLengthDistinctKey.name]: true,
+        }) };
+        const output = getSafeBindings(await actor.run(op, undefined));
+        await expect(output.metadata()).resolves.toEqual({
+          cardinality: { type: 'estimate', value: 4 },
+          variables: [
+            { variable: DF.variable('x'), canBeUndef: false },
+          ],
+        });
+        await expect(output.bindingsStream).toEqualBindingsStream([
+          BF.bindings([[ DF.variable('x'), DF.namedNode('1') ]]),
+          BF.bindings([[ DF.variable('x'), DF.namedNode('3') ]]),
+        ]);
+        expect(operations).toEqual([
+          factory.createPath(DF.variable('x'), predicate, DF.variable('b')),
+        ]);
+      });
+
+      it('should not reuse the graph variable for the object (GRAPH ?b { ?x :p+ ?x })', async() => {
+        bindings = [
+          BF.bindings([
+            [ DF.variable('x'), DF.namedNode('1') ],
+            [ DF.variable('bb'), DF.namedNode('1') ],
+            [ DF.variable('b'), DF.namedNode('g1') ],
+          ]),
+          BF.bindings([
+            [ DF.variable('x'), DF.namedNode('1') ],
+            [ DF.variable('bb'), DF.namedNode('2') ],
+            [ DF.variable('b'), DF.namedNode('g2') ],
+          ]),
+        ];
+        const predicate = factory.createOneOrMorePath(factory.createLink(DF.namedNode('p')));
+        const op: any = { operation: factory.createPath(
+          DF.variable('x'),
+          predicate,
+          DF.variable('x'),
+          DF.variable('b'),
+        ), context: new ActionContext({
+          [KeysInitQuery.dataFactory.name]: DF,
+          [KeysQueryOperation.isPathArbitraryLengthDistinctKey.name]: true,
+        }) };
+        const output = getSafeBindings(await actor.run(op, undefined));
+        await expect(output.metadata()).resolves.toEqual({
+          cardinality: { type: 'estimate', value: 2 },
+          variables: [
+            { variable: DF.variable('x'), canBeUndef: false },
+            { variable: DF.variable('b'), canBeUndef: false },
+          ],
+        });
+        await expect(output.bindingsStream).toEqualBindingsStream([
+          BF.bindings([
+            [ DF.variable('x'), DF.namedNode('1') ],
+            [ DF.variable('b'), DF.namedNode('g1') ],
+          ]),
+        ]);
+        expect(operations).toEqual([
+          factory.createPath(DF.variable('x'), predicate, DF.variable('bb'), DF.variable('b')),
+        ]);
+      });
     });
 
     it('should support OneOrMore paths with 2 variables', async() => {

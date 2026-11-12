@@ -1,6 +1,6 @@
+import type { Algebra } from '@comunica/utils-algebra';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
-import type { Algebra } from 'sparqlalgebrajs';
 import type { BindingsStream } from './Bindings';
 import type { IActionContext } from './IActionContext';
 import type { QueryAlgebraContext, QueryStringContext } from './IQueryContext';
@@ -10,6 +10,113 @@ import type { QuerySourceUnidentified } from './IQuerySource';
 export type QueryFormatType = string | Algebra.Operation;
 export type SourceType = QuerySourceUnidentified;
 export type QueryType = QueryEnhanced & { context?: IActionContext };
+
+/**
+ * Quads to insert into and delete from a destination, and graphs to delete and create in it.
+ */
+export interface IQuadUpdate {
+  /**
+   * An optional stream of quads to insert.
+   */
+  quadStreamInsert?: AsyncIterator<RDF.Quad>;
+  /**
+   * An optional stream of quads to delete.
+   */
+  quadStreamDelete?: AsyncIterator<RDF.Quad>;
+  /**
+   * An optional deletion of graphs.
+   */
+  deleteGraphs?: {
+    /**
+     * The graph(s) in which all triples must be removed.
+     */
+    graphs: RDF.DefaultGraph | 'NAMED' | 'ALL' | RDF.NamedNode[];
+    /**
+     * If true, and the graph does not exist, an error must be emitted.
+     *
+     * Should only be considered on destinations that record empty graphs.
+     */
+    requireExistence: boolean;
+    /**
+     * If the graph itself should also be dropped.
+     * Should not happen on the 'DEFAULT' graph.
+     *
+     * Should only be considered on destinations that record empty graphs.
+     */
+    dropGraphs: boolean;
+  };
+  /**
+   * An optional creation of (empty) graphs.
+   */
+  createGraphs?: {
+    /**
+     * The graph names to create.
+     */
+    graphs: RDF.NamedNode[];
+    /**
+     * If true, an error MUST be thrown when the graph already exists.
+     *
+     * For destinations that do not record empty graphs,
+     * this should only throw if at least one quad with the given quad already exists.
+     */
+    requireNonExistence: boolean;
+  };
+}
+
+/**
+ * Options for parsing a stream of RDF.
+ */
+export interface IRdfParseOptions {
+  /**
+   * The content type of the stream.
+   */
+  contentType: string;
+  /**
+   * An optional base IRI of the stream's document.
+   */
+  baseIRI?: string;
+  /**
+   * The version to consider as media type parameter.
+   */
+  version?: string;
+}
+
+/**
+ * Options for warming up a query engine.
+ */
+export interface IWarmupOptions {
+  /**
+   * The maximum number of query executions.
+   */
+  executions?: number;
+  /**
+   * The maximum warmup duration in milliseconds.
+   */
+  budget?: number;
+  /**
+   * A signal to stop early, after which no new query executions start.
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * Options for warming up a query engine, with at least one of the options that stop the warm-up.
+ * About 2000 executions suit sources in memory or in files.
+ * Over remote sources, every execution accesses the network,
+ * so fewer executions or a budget suit them, depending on the type of source.
+ */
+export type IWarmupOptionsBounded = IWarmupOptions &
+  ({ executions: number } | { budget: number } | { signal: AbortSignal });
+
+/**
+ * The outcome of warming up a query engine.
+ */
+export interface IWarmupResult {
+  /**
+   * The number of query executions.
+   */
+  executions: number;
+}
 
 /**
  * Base interface for a Comunica query engine.
@@ -99,6 +206,36 @@ export interface IQueryEngine<
     context: QueryFormatTypeInner extends string ? QueryStringContextInner : QueryAlgebraContextInner,
     explainMode: QueryExplainMode,
   ) => Promise<IQueryExplained>;
+  // TODO: make mandatory in next/major
+  /**
+   * Update the destination with the given quads and graphs, without serializing them into an update query.
+   * @param update The quads to insert and delete, and the graphs to delete and create.
+   * @param context A context, which determines the destination in the same way as for update queries.
+   * @return {Promise<void>} A promise that resolves when the destination has been updated.
+   */
+  updateQuads?: (update: IQuadUpdate, context?: Partial<QueryAlgebraContextInner>) => Promise<void>;
+  // TODO: make mandatory in next/major
+  /**
+   * Parse a stream of RDF with the parsers of this engine.
+   * @param stream A text stream in an RDF serialization.
+   * @param options The content type of the stream, and optional parsing and context options.
+   * @return A promise resolving to a stream of the parsed quads.
+   */
+  parseRdf?: (
+    stream: NodeJS.ReadableStream,
+    options: IRdfParseOptions & Partial<QueryAlgebraContextInner>,
+  ) => Promise<RDF.Stream>;
+  // TODO: make mandatory in next/major
+  /**
+   * Warm up this engine by executing queries over the sources in the given context,
+   * so that the just-in-time compiler has optimized the engine before it handles actual queries.
+   * The warm-up does not modify the sources.
+   * @param context A context, which determines the sources in the same way as for queries.
+   * @param options The maximum number of query executions and duration, and a signal to stop early.
+   *                At least one of them is required.
+   * @return A promise resolving to the number of query executions.
+   */
+  warmup?: (context: QueryStringContextInner, options: IWarmupOptionsBounded) => Promise<IWarmupResult>;
   /**
    * @param context An optional context.
    * @return {Promise<{[p: string]: number}>} All available SPARQL (weighted) result media types.

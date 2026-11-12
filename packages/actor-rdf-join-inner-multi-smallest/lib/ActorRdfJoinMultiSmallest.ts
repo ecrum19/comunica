@@ -17,8 +17,8 @@ import type {
   IJoinEntryWithMetadata,
   ComunicaDataFactory,
 } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import { getSafeBindings } from '@comunica/utils-query-operation';
-import { Factory } from 'sparqlalgebrajs';
 
 /**
  * A Multi Smallest RDF Join Actor.
@@ -35,8 +35,9 @@ export class ActorRdfJoinMultiSmallest extends ActorRdfJoin<IActorRdfJoinMultiSm
       limitEntries: 3,
       limitEntriesMin: true,
       canHandleUndefs: true,
-      isLeaf: false,
     });
+    this.mediatorJoinEntriesSort = args.mediatorJoinEntriesSort;
+    this.mediatorJoin = args.mediatorJoin;
   }
 
   /**
@@ -81,7 +82,7 @@ export class ActorRdfJoinMultiSmallest extends ActorRdfJoin<IActorRdfJoinMultiSm
     sideData: IActorRdfJoinMultiSmallestTestSideData,
   ): Promise<IActorRdfJoinOutputInner> {
     const dataFactory: ComunicaDataFactory = action.context.getSafe(KeysInitQuery.dataFactory);
-    const algebraFactory = new Factory(dataFactory);
+    const algebraFactory = new AlgebraFactory(dataFactory);
 
     // Determine the two smallest streams by sorting (e.g. via cardinality)
     const entries: IJoinEntry[] = sideData.sortedEntries;
@@ -123,8 +124,19 @@ export class ActorRdfJoinMultiSmallest extends ActorRdfJoin<IActorRdfJoinMultiSm
     const requestInitialTimes = ActorRdfJoin.getRequestInitialTimes(metadatas);
     const requestItemTimes = ActorRdfJoin.getRequestItemTimes(metadatas);
 
+    // This actor joins the entries one at a time, in the order they were just sorted into: it joins the first two,
+    // then joins that result with the third, and so on. Each of those joins reads both of its inputs, so the work
+    // is the size of the result so far plus the size of the entry being added to it, summed over the steps.
+    // Entries are joined on a variable they share, so a join produces at most as many rows as its smaller input.
+    let rows = metadatas[0].cardinality.value;
+    let iterations = rows;
+    for (const metadata of metadatas.slice(1)) {
+      iterations += rows + metadata.cardinality.value;
+      rows = Math.min(rows, metadata.cardinality.value);
+    }
+
     return passTestWithSideData({
-      iterations: metadatas.reduce((acc, metadata) => acc * metadata.cardinality.value, 1),
+      iterations,
       persistedItems: 0,
       blockingItems: 0,
       requestTime: metadatas.reduce((sum, metadata, i) => sum + requestInitialTimes[i] +

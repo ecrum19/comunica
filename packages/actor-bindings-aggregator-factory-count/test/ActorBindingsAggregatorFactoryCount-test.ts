@@ -3,20 +3,19 @@ import type {
 } from '@comunica/bus-expression-evaluator-factory';
 import { Bus } from '@comunica/core';
 import type { IActionContext } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import {
   getMockEEActionContext,
   getMockMediatorExpressionEvaluatorFactory,
   makeAggregate,
-} from '@comunica/utils-expression-evaluator/test/util/helpers';
-import { Algebra } from 'sparqlalgebrajs';
-import { Wildcard } from 'sparqljs';
+} from '@comunica/utils-jest';
 import { ActorBindingsAggregatorFactoryCount } from '../lib';
-import '@comunica/utils-jest';
 
 describe('ActorExpressionEvaluatorAggregateCount', () => {
   let bus: any;
   let mediatorExpressionEvaluatorFactory: MediatorExpressionEvaluatorFactory;
   const exception = 'This actor only supports the \'count\' aggregator without wildcard.';
+  const AF = new AlgebraFactory();
 
   beforeEach(() => {
     bus = new Bus({ name: 'bus' });
@@ -62,20 +61,10 @@ describe('ActorExpressionEvaluatorAggregateCount', () => {
       });
 
       it('rejects wildcard', async() => {
+        const expr = AF.createAggregateExpression('count', AF.createWildcardExpression(), false, '');
         await expect(actor.test({
           context,
-          expr: {
-            type: Algebra.types.EXPRESSION,
-            expressionType: Algebra.expressionTypes.AGGREGATE,
-            aggregator: 'count',
-            distinct: false,
-            separator: '',
-            expression: {
-              type: Algebra.types.EXPRESSION,
-              expressionType: Algebra.expressionTypes.WILDCARD,
-              wildcard: new Wildcard(),
-            },
-          },
+          expr,
         })).resolves.toFailTest(exception);
       });
 

@@ -1,14 +1,14 @@
 import { KeysInitQuery } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IActionContext } from '@comunica/types';
+import { AlgebraFactory } from '@comunica/utils-algebra';
 import type * as RDF from '@rdfjs/types';
 import { DataFactory } from 'rdf-data-factory';
-import { Factory } from 'sparqlalgebrajs';
 import { ActorOptimizeQueryOperationRewriteCopy } from '../lib/ActorOptimizeQueryOperationRewriteCopy';
 import '@comunica/utils-jest';
 
 const DF = new DataFactory<RDF.BaseQuad>();
-const AF = new Factory();
+const AF = new AlgebraFactory(DF);
 
 describe('ActorOptimizeQueryOperationRewriteCopy', () => {
   let bus: any;
@@ -26,18 +26,25 @@ describe('ActorOptimizeQueryOperationRewriteCopy', () => {
       actor = new ActorOptimizeQueryOperationRewriteCopy({ name: 'actor', bus });
     });
 
+    it('should not change operations without COPY operations', async() => {
+      const algebraFactory = new AlgebraFactory();
+      const operation = algebraFactory.createProject(
+        algebraFactory.createPattern(DF.variable('s'), DF.namedNode('p'), DF.variable('o')),
+        [ DF.variable('s') ],
+      );
+      const action = { operation, context: new ActionContext() };
+      const result = await actor.run(action);
+      expect(result.operation).toBe(operation);
+      expect(result.context).toBe(action.context);
+    });
+
     it('should always test', async() => {
       await expect(actor.test({ operation: <any> null, context })).resolves.toPassTestVoid();
     });
 
     it('should run with different named source and named dest', async() => {
-      const op: any = {
-        operation: {
-          type: 'copy',
-          source: DF.namedNode('SOURCE'),
-          destination: DF.namedNode('DEST'),
-          silent: false,
-        },
+      const op = {
+        operation: AF.createCopy(DF.namedNode('SOURCE'), DF.namedNode('DEST'), false),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);
@@ -48,13 +55,8 @@ describe('ActorOptimizeQueryOperationRewriteCopy', () => {
     });
 
     it('should run with different named source and named dest in silent mode', async() => {
-      const op: any = {
-        operation: {
-          type: 'copy',
-          source: DF.namedNode('SOURCE'),
-          destination: DF.namedNode('DEST'),
-          silent: true,
-        },
+      const op = {
+        operation: AF.createCopy(DF.namedNode('SOURCE'), DF.namedNode('DEST'), true),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);
@@ -65,13 +67,8 @@ describe('ActorOptimizeQueryOperationRewriteCopy', () => {
     });
 
     it('should run with equal named source and named dest', async() => {
-      const op: any = {
-        operation: {
-          type: 'copy',
-          source: DF.namedNode('SOURCE'),
-          destination: DF.namedNode('SOURCE'),
-          silent: false,
-        },
+      const op = {
+        operation: AF.createCopy(DF.namedNode('SOURCE'), DF.namedNode('SOURCE'), false),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);
@@ -79,13 +76,8 @@ describe('ActorOptimizeQueryOperationRewriteCopy', () => {
     });
 
     it('should run with equal default source and default dest', async() => {
-      const op: any = {
-        operation: {
-          type: 'copy',
-          source: 'DEFAULT',
-          destination: 'DEFAULT',
-          silent: false,
-        },
+      const op = {
+        operation: AF.createCopy('DEFAULT', 'DEFAULT', false),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);
@@ -93,13 +85,8 @@ describe('ActorOptimizeQueryOperationRewriteCopy', () => {
     });
 
     it('should run with different default source and named dest', async() => {
-      const op: any = {
-        operation: {
-          type: 'copy',
-          source: 'DEFAULT',
-          destination: DF.namedNode('DEST'),
-          silent: false,
-        },
+      const op = {
+        operation: AF.createCopy('DEFAULT', DF.namedNode('DEST'), false),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);
@@ -110,13 +97,8 @@ describe('ActorOptimizeQueryOperationRewriteCopy', () => {
     });
 
     it('should run with different named source and default dest', async() => {
-      const op: any = {
-        operation: {
-          type: 'copy',
-          source: DF.namedNode('SOURCE'),
-          destination: 'DEFAULT',
-          silent: false,
-        },
+      const op = {
+        operation: AF.createCopy(DF.namedNode('SOURCE'), 'DEFAULT', false),
         context: new ActionContext({ [KeysInitQuery.dataFactory.name]: DF }),
       };
       const { operation } = await actor.run(op);

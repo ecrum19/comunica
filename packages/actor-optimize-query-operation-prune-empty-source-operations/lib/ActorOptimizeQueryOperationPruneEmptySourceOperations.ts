@@ -4,7 +4,7 @@ import type {
   IActorOptimizeQueryOperationArgs,
 } from '@comunica/bus-optimize-query-operation';
 import { ActorOptimizeQueryOperation } from '@comunica/bus-optimize-query-operation';
-import { KeysInitQuery, KeysQuerySourceIdentify } from '@comunica/context-entries';
+import { KeysHttp, KeysInitQuery, KeysQueryOperation, KeysQuerySourceIdentify } from '@comunica/context-entries';
 import type { IActorTest, TestResult } from '@comunica/core';
 import { failTest, passTestVoid } from '@comunica/core';
 import type {
@@ -14,17 +14,20 @@ import type {
   MetadataBindings,
   QueryResultCardinality,
 } from '@comunica/types';
-import { doesShapeAcceptOperation, getOperationSource } from '@comunica/utils-query-operation';
-import { Algebra, Factory, Util } from 'sparqlalgebrajs';
+import { Algebra, AlgebraFactory, algebraUtils, isKnownOperation, isKnownSubType } from '@comunica/utils-algebra';
+import { doesShapeAcceptOperationInContext, getOperationSource } from '@comunica/utils-query-operation';
 
 /**
  * A comunica Prune Empty Source Operations Optimize Query Operation Actor.
  */
 export class ActorOptimizeQueryOperationPruneEmptySourceOperations extends ActorOptimizeQueryOperation {
   private readonly useAskIfSupported: boolean;
+  private readonly askTimeout: number;
 
   public constructor(args: IActorOptimizeQueryOperationPruneEmptySourceOperationsArgs) {
     super(args);
+    this.useAskIfSupported = args.useAskIfSupported;
+    this.askTimeout = args.askTimeout ?? 3000;
   }
 
   public async test(action: IActionOptimizeQueryOperation): Promise<TestResult<IActorTest>> {
@@ -36,33 +39,37 @@ export class ActorOptimizeQueryOperationPruneEmptySourceOperations extends Actor
 
   public async run(action: IActionOptimizeQueryOperation): Promise<IActorOptimizeQueryOperationOutput> {
     const dataFactory: ComunicaDataFactory = action.context.getSafe(KeysInitQuery.dataFactory);
-    const algebraFactory = new Factory(dataFactory);
+    const algebraFactory = new AlgebraFactory(dataFactory);
 
     let operation = action.operation;
 
     // Collect all operations with source types
     // Only consider unions of patterns or alts of links, since these are created during exhaustive source assignment.
     const collectedOperations: (Algebra.Pattern | Algebra.Link)[] = [];
-    // eslint-disable-next-line ts/no-this-alias
-    const self = this;
-    Util.recurseOperation(operation, {
-      [Algebra.types.UNION](subOperation) {
-        self.collectMultiOperationInputs(subOperation.input, collectedOperations, Algebra.types.PATTERN);
-        return true;
-      },
-      [Algebra.types.ALT](subOperation) {
-        self.collectMultiOperationInputs(subOperation.input, collectedOperations, Algebra.types.LINK);
-        return false;
-      },
-      [Algebra.types.SERVICE]() {
-        return false;
-      },
+    algebraUtils.visitOperation(operation, {
+      [Algebra.Types.UNION]: { preVisitor: (subOperation) => {
+        this.collectMultiOperationInputs(subOperation.input, collectedOperations, Algebra.Types.PATTERN);
+        return {};
+      } },
+      [Algebra.Types.ALT]: { preVisitor: (subOperation) => {
+        this.collectMultiOperationInputs(subOperation.input, collectedOperations, Algebra.Types.LINK);
+        return { continue: false };
+      } },
+      [Algebra.Types.SERVICE]: { preVisitor: () => ({ continue: false }) },
+      // The zero-length results of these paths range over all nodes of the sources of their links,
+      // so these links must be kept, even if they have no results themselves.
+      [Algebra.Types.ZERO_OR_MORE_PATH]: { preVisitor: () => ({ continue: false }) },
+      [Algebra.Types.ZERO_OR_ONE_PATH]: { preVisitor: () => ({ continue: false }) },
+      // Operations within FROM (NAMED) are evaluated over a different dataset than the source's default dataset.
+      // Their graphs are only rewritten when the FROM operation is executed,
+      // so emptiness checks against the source would be done on the wrong graphs here.
+      [Algebra.Types.FROM]: { preVisitor: () => ({ continue: false }) },
     });
 
     // Determine in an async manner whether or not these sources return non-empty results
     const emptyOperations: Set<Algebra.Operation> = new Set();
     await Promise.all(collectedOperations.map(async(collectedOperation) => {
-      const checkOperation = collectedOperation.type === 'link' ?
+      const checkOperation = collectedOperation.type === Algebra.Types.LINK ?
         algebraFactory.createPattern(dataFactory.variable('s'), collectedOperation.iri, dataFactory.variable('o')) :
         collectedOperation;
       if (!await this.hasSourceResults(
@@ -78,78 +85,97 @@ export class ActorOptimizeQueryOperationPruneEmptySourceOperations extends Actor
     // Only perform next mapping if we have at least one empty operation
     if (emptyOperations.size > 0) {
       this.logDebug(action.context, `Pruning ${emptyOperations.size} source-specific operations`);
-      // Rewrite operations by removing the empty children
-      operation = Util.mapOperation(operation, {
-        [Algebra.types.UNION](subOperation, factory) {
-          return self.mapMultiOperation(subOperation, emptyOperations, children => factory.createUnion(children));
-        },
-        [Algebra.types.ALT](subOperation, factory) {
-          return self.mapMultiOperation(subOperation, emptyOperations, children => factory.createAlt(children));
-        },
-      }, algebraFactory);
-
-      // Identify and remove operations that have become empty now due to missing variables
-      operation = Util.mapOperation(operation, {
-        [Algebra.types.PROJECT](subOperation, factory) {
-          // Remove projections that have become empty now due to missing variables
-          if (ActorOptimizeQueryOperationPruneEmptySourceOperations.hasEmptyOperation(subOperation)) {
-            return {
-              recurse: false,
-              result: factory.createUnion([]),
-            };
-          }
-          return {
-            recurse: true,
-            result: subOperation,
-          };
-        },
-        [Algebra.types.LEFT_JOIN](subOperation) {
-          // Remove left joins with empty right operation
-          if (ActorOptimizeQueryOperationPruneEmptySourceOperations.hasEmptyOperation(subOperation.input[1])) {
-            return {
-              recurse: true,
-              result: subOperation.input[0],
-            };
-          }
-          return {
-            recurse: true,
-            result: subOperation,
-          };
-        },
-      }, algebraFactory);
+      operation = this.removeEmptyOperations(algebraFactory, operation, emptyOperations);
     }
 
     return { operation, context: action.context };
   }
 
-  protected static hasEmptyOperation(operation: Algebra.Operation): boolean {
-    // If union (or alt) is empty, consider it empty (`Array.every` on an empty array always returns true)
-    // But if we find a union with multiple children,
-    // *all* of the children must be empty before the full operation is considered empty.
-    let emptyOperation = false;
-    Util.recurseOperation(operation, {
-      [Algebra.types.UNION](subOperation) {
-        if (subOperation.input.every(subSubOperation => ActorOptimizeQueryOperationPruneEmptySourceOperations
-          .hasEmptyOperation(subSubOperation))) {
-          emptyOperation = true;
+  /**
+   * Remove the given empty operations, and let the emptiness they leave behind propagate upwards.
+   * Since the operations are rewritten bottom-up, each operation only has to check whether its inputs *are* empty,
+   * for which an empty union (or alt within property paths) is used.
+   * Emptiness only propagates through the operations that need results from their inputs,
+   * so not for instance through the expressions of a FILTER, as a `NOT EXISTS` over an empty operation still holds.
+   * @param algebraFactory The algebra factory.
+   * @param operation The operation to remove empty operations from.
+   * @param emptyOperations The operations without results.
+   */
+  public removeEmptyOperations(
+    algebraFactory: AlgebraFactory,
+    operation: Algebra.Operation,
+    emptyOperations: Set<Algebra.Operation>,
+  ): Algebra.Operation {
+    const isEmpty = ActorOptimizeQueryOperationPruneEmptySourceOperations.isEmptyOperation;
+    const emptyOperation: () => Algebra.Operation = () => algebraFactory.createUnion([]);
+    const emptyPath: () => Algebra.Alt = () => algebraFactory.createAlt([]);
+
+    const emptyIfInputIsEmpty = { transform: (subOperation: Algebra.Single) =>
+      isEmpty(subOperation.input) ? emptyOperation() : subOperation };
+    const emptyPathIfPathIsEmpty = { transform: (subOperation: Algebra.Inv | Algebra.OneOrMorePath) =>
+      isEmpty(subOperation.path) ? emptyPath() : subOperation };
+    // Only the left operation determines whether there are results, and an empty right one matches nothing
+    const leftIfAnyInputIsEmpty = { transform: (subOperation: Algebra.LeftJoin | Algebra.Minus) =>
+      subOperation.input.some(isEmpty) ? subOperation.input[0] : subOperation };
+
+    return algebraUtils.mapOperation(operation, {
+      [Algebra.Types.UNION]: { transform: (subOperation, origOp) =>
+        this.mapMultiOperation(subOperation, origOp, emptyOperations, children =>
+          algebraFactory.createUnion(children)) },
+      [Algebra.Types.ALT]: { transform: (subOperation, origOp) =>
+        this.mapMultiOperation(subOperation, origOp, emptyOperations, children =>
+          algebraFactory.createAlt(children)) },
+      [Algebra.Types.JOIN]: { transform: subOperation =>
+        subOperation.input.some(isEmpty) ? emptyOperation() : subOperation },
+      [Algebra.Types.SEQ]: { transform: subOperation =>
+        subOperation.input.some(isEmpty) ? emptyPath() : subOperation },
+      [Algebra.Types.LEFT_JOIN]: leftIfAnyInputIsEmpty,
+      [Algebra.Types.MINUS]: leftIfAnyInputIsEmpty,
+      [Algebra.Types.FILTER]: emptyIfInputIsEmpty,
+      [Algebra.Types.EXTEND]: emptyIfInputIsEmpty,
+      [Algebra.Types.PROJECT]: emptyIfInputIsEmpty,
+      [Algebra.Types.DISTINCT]: emptyIfInputIsEmpty,
+      [Algebra.Types.REDUCED]: emptyIfInputIsEmpty,
+      [Algebra.Types.SLICE]: emptyIfInputIsEmpty,
+      [Algebra.Types.ORDER_BY]: emptyIfInputIsEmpty,
+      [Algebra.Types.GRAPH]: emptyIfInputIsEmpty,
+      [Algebra.Types.GROUP]: { transform: (subOperation) => {
+        if (!isEmpty(subOperation.input)) {
+          return subOperation;
         }
-        return false;
-      },
-      [Algebra.types.ALT](subOperation) {
-        if (subOperation.input.length === 0) {
-          emptyOperation = true;
+        // Without grouping keys, a group produces a single result, even without input,
+        // so its empty operation is replaced by one that can be sent to a source.
+        return subOperation.variables.length > 0 ?
+          emptyOperation() :
+            { ...subOperation, input: algebraFactory.createValues([], []) };
+      } },
+      [Algebra.Types.PATH]: { transform: subOperation =>
+        isEmpty(subOperation.predicate) ? emptyOperation() : subOperation },
+      // Unlike zero-or-more and zero-or-one paths, these have no zero-length results
+      [Algebra.Types.INV]: emptyPathIfPathIsEmpty,
+      [Algebra.Types.ONE_OR_MORE_PATH]: emptyPathIfPathIsEmpty,
+      [Algebra.Types.EXPRESSION]: { transform: (subOperation) => {
+        // Replace (NOT) EXISTS over an empty operation by its outcome,
+        // so that no empty operation remains within expressions, as these may be sent to a source.
+        if (isKnownSubType(subOperation, Algebra.ExpressionTypes.EXISTENCE) && isEmpty(subOperation.input)) {
+          return algebraFactory.createTermExpression(algebraFactory.dataFactory.literal(
+            String(subOperation.not),
+            algebraFactory.dataFactory.namedNode('http://www.w3.org/2001/XMLSchema#boolean'),
+          ));
         }
-        return false;
-      },
-      [Algebra.types.LEFT_JOIN](subOperation) {
-        // Only recurse into left part of left-join
-        if (ActorOptimizeQueryOperationPruneEmptySourceOperations.hasEmptyOperation(subOperation.input[0])) {
-          emptyOperation = true;
-        }
-        return false;
-      },
+        return subOperation;
+      } },
     });
-    return emptyOperation;
+  }
+
+  /**
+   * Check if the given operation is an empty union, or an empty alt within a property path.
+   * @param operation An operation.
+   */
+  protected static isEmptyOperation(operation: Algebra.Operation): boolean {
+    return (isKnownOperation(operation, Algebra.Types.UNION) ||
+        isKnownOperation(operation, Algebra.Types.ALT)) &&
+      operation.input.length === 0;
   }
 
   protected collectMultiOperationInputs(
@@ -158,34 +184,39 @@ export class ActorOptimizeQueryOperationPruneEmptySourceOperations extends Actor
     inputType: (Algebra.Pattern | Algebra.Link)['type'],
   ): void {
     for (const input of inputs) {
-      if (getOperationSource(input) && input.type === inputType) {
+      if (getOperationSource(input) && isKnownOperation(input, inputType)) {
         collectedOperations.push(input);
       }
     }
   }
 
   protected mapMultiOperation<O extends Algebra.Union | Algebra.Alt>(
-    operation: O,
+    operationCopy: O,
+    origOp: O,
     emptyOperations: Set<Algebra.Operation>,
     multiOperationFactory: (input: O['input']) => Algebra.Operation,
-  ): {
-      result: Algebra.Operation;
-      recurse: boolean;
-    } {
-    // Determine which operations return non-empty results
-    const nonEmptyInputs = operation.input.filter(input => !emptyOperations.has(input));
+  ): Algebra.Operation {
+    // Determine which operations return non-empty results,
+    // also removing children that have become empty themselves, as these can not be sent to a source.
+    const nonEmptyInputs: Algebra.Operation[] = [];
+    for (const [ idx, input ] of operationCopy.input.entries()) {
+      if (!emptyOperations.has(origOp.input[idx]) &&
+        !ActorOptimizeQueryOperationPruneEmptySourceOperations.isEmptyOperation(input)) {
+        nonEmptyInputs.push(input);
+      }
+    }
 
     // Remove empty operations
-    if (nonEmptyInputs.length === operation.input.length) {
-      return { result: operation, recurse: true };
+    if (nonEmptyInputs.length === operationCopy.input.length) {
+      return operationCopy;
     }
     if (nonEmptyInputs.length === 0) {
-      return { result: multiOperationFactory([]), recurse: false };
+      return multiOperationFactory([]);
     }
     if (nonEmptyInputs.length === 1) {
-      return { result: nonEmptyInputs[0], recurse: true };
+      return nonEmptyInputs[0];
     }
-    return { result: multiOperationFactory(nonEmptyInputs), recurse: true };
+    return multiOperationFactory(nonEmptyInputs);
   }
 
   /**
@@ -196,29 +227,34 @@ export class ActorOptimizeQueryOperationPruneEmptySourceOperations extends Actor
    * @param context The query context.
    */
   public async hasSourceResults(
-    algebraFactory: Factory,
+    algebraFactory: AlgebraFactory,
     source: IQuerySourceWrapper,
     input: Algebra.Operation,
     context: IActionContext,
   ): Promise<boolean> {
     const mergedContext = source.context ? context.merge(source.context) : context;
-    const wildcardAcceptAllExtensionFunctions = mergedContext.get(KeysInitQuery.extensionFunctionsAlwaysPushdown);
 
     // Traversal contexts should never be considered empty at optimization time.
     if (mergedContext.get(KeysQuerySourceIdentify.traverse)) {
       return true;
     }
 
+    // The target of a SERVICE SILENT clause must never be pruned:
+    // if it fails, it must produce a single empty solution rather than no results at all.
+    if (mergedContext.get(KeysQueryOperation.silent)) {
+      return true;
+    }
+
     // Prefer ASK over COUNT when instructed to, and the source allows it
     if (this.useAskIfSupported) {
       const askOperation = algebraFactory.createAsk(input);
-      const askSupported = doesShapeAcceptOperation(
-        await source.source.getSelectorShape(context),
+      const askSupported = doesShapeAcceptOperationInContext(
+        await source.source.getSelectorShape(mergedContext),
         askOperation,
-        { wildcardAcceptAllExtensionFunctions },
+        mergedContext,
       );
       if (askSupported) {
-        return source.source.queryBoolean(askOperation, mergedContext);
+        return this.queryAsk(source, askOperation, mergedContext);
       }
     }
 
@@ -237,17 +273,63 @@ export class ActorOptimizeQueryOperationPruneEmptySourceOperations extends Actor
     // Since the VoID estimators in Comunica cannot produce false negatives, only positive assignments must be verified.
     if (cardinality.type === 'estimate' && cardinality.value > 0) {
       const askOperation = algebraFactory.createAsk(input);
-      const askSupported = doesShapeAcceptOperation(
-        await source.source.getSelectorShape(context),
+      const askSupported = doesShapeAcceptOperationInContext(
+        await source.source.getSelectorShape(mergedContext),
         askOperation,
-        { wildcardAcceptAllExtensionFunctions },
+        mergedContext,
       );
       if (askSupported) {
-        return source.source.queryBoolean(askOperation, mergedContext);
+        return this.queryAsk(source, askOperation, mergedContext);
       }
     }
 
     return cardinality.value > 0;
+  }
+
+  /**
+   * Execute an ASK query and return the result.
+   * Returns true if no reply was received within the timeout.
+   * @param source A query source.
+   * @param askOperation An ASK operation.
+   * @param context The query context.
+   */
+  public async queryAsk(
+    source: IQuerySourceWrapper,
+    askOperation: Algebra.Ask,
+    context: IActionContext,
+  ): Promise<boolean> {
+    let askContext = context;
+    let timeout: Promise<boolean> | undefined;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    if (this.askTimeout > 0) {
+      // Abort the request on timeout, so that it does not keep occupying the source.
+      const abortController = new AbortController();
+      const existingAbortSignal = context.get(KeysHttp.httpAbortSignal);
+      askContext = context.set(
+        KeysHttp.httpAbortSignal,
+        existingAbortSignal ?
+          AbortSignal.any([ existingAbortSignal, abortController.signal ]) :
+          abortController.signal,
+      );
+      timeout = new Promise<boolean>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          this.logDebug(context, `ASK query timed out after ${this.askTimeout} ms, assuming the source has results`);
+          resolve(true);
+          abortController.abort();
+        }, this.askTimeout);
+      });
+    }
+
+    try {
+      const ask = source.source.queryBoolean(askOperation, askContext);
+      return await (timeout ? Promise.race([ ask, timeout ]) : ask);
+    } catch (error: unknown) {
+      // Pruning is only an optimization, so a failing check must not fail the query.
+      this.logDebug(context, `ASK query failed, assuming the source has results: ${(<Error> error).message}`);
+      return true;
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
   }
 }
 
@@ -258,4 +340,12 @@ export interface IActorOptimizeQueryOperationPruneEmptySourceOperationsArgs exte
    * @default {false}
    */
   useAskIfSupported: boolean;
+  /**
+   * Timeout in milliseconds for ASK queries, after which the source is assumed to have results.
+   * Failing ASK queries also lead to the source being assumed to have results.
+   * A value of 0 or less disables the timeout.
+   * @range {integer}
+   * @default {3000}
+   */
+  askTimeout?: number;
 }

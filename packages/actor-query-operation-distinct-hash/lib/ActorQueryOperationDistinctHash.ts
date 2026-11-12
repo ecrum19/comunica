@@ -14,10 +14,10 @@ import type {
   IQueryOperationResultBindings,
   IQueryOperationResultQuads,
 } from '@comunica/types';
+import { Algebra } from '@comunica/utils-algebra';
 import { getSafeBindings, getSafeQuads } from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
-import type { Algebra } from 'sparqlalgebrajs';
 
 /**
  * A comunica Distinct Hash Query Operation Actor.
@@ -27,7 +27,9 @@ export class ActorQueryOperationDistinctHash extends ActorQueryOperationTypedMed
   public readonly mediatorHashQuads: MediatorHashQuads;
 
   public constructor(args: IActorQueryOperationDistinctHashArgs) {
-    super(args, 'distinct');
+    super(args, Algebra.Types.DISTINCT);
+    this.mediatorHashBindings = args.mediatorHashBindings;
+    this.mediatorHashQuads = args.mediatorHashQuads;
   }
 
   public async testOperation(_operation: Algebra.Distinct, _context: IActionContext): Promise<TestResult<IActorTest>> {
@@ -76,10 +78,10 @@ export class ActorQueryOperationDistinctHash extends ActorQueryOperationTypedMed
     variables: RDF.Variable[],
   ): Promise<(bindings: Bindings) => boolean> {
     const { hashFunction } = await this.mediatorHashBindings.mediate({ context });
-    const hashes: Record<number, boolean> = {};
+    const hashes = new Set<number>();
     return (bindings: Bindings) => {
       const hash: number = hashFunction(bindings, variables);
-      return !(hash in hashes) && (hashes[hash] = true);
+      return !hashes.has(hash) && Boolean(hashes.add(hash));
     };
   }
 
@@ -91,10 +93,10 @@ export class ActorQueryOperationDistinctHash extends ActorQueryOperationTypedMed
    */
   public async newHashFilterQuads(context: IActionContext): Promise<(quad: RDF.Quad) => boolean> {
     const { hashFunction } = await this.mediatorHashQuads.mediate({ context });
-    const hashes: Record<number, boolean> = {};
+    const hashes = new Set<number>();
     return (quad: RDF.Quad) => {
       const hash: number = hashFunction(quad);
-      return !(hash in hashes) && (hashes[hash] = true);
+      return !hashes.has(hash) && Boolean(hashes.add(hash));
     };
   }
 }

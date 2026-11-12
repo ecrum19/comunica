@@ -1,10 +1,12 @@
 import type * as RDF from '@rdfjs/types';
-import type { FunctionArgumentsCache } from './ExpressionEvaluator';
+import type { ComunicaDataFactory } from './ComunicaDataFactory';
+import type { ExistenceResolver, FunctionArgumentsCache } from './ExpressionEvaluator';
 import type { IDataDestination } from './IDataDestination';
 import type { IProxyHandler } from './IProxyHandler';
 import type { SourceType } from './IQueryEngine';
 import type { QueryExplainMode } from './IQueryOperationResult';
 import type { Logger } from './Logger';
+import type { IServiceExecutor, ServiceExecutorCreator } from './ServiceExecutor';
 
 // We omit `& RDF.QuerySourceContext<SourceType>` in the following two types
 // as the QuerySourceContext proved to be too developer-unfriendly.
@@ -19,11 +21,37 @@ export type QueryStringContext = RDF.QueryStringContext & IQueryContextCommon;
 export type QueryAlgebraContext = RDF.QueryAlgebraContext & IQueryContextCommon;
 
 /**
+ * The possible decisions for a single named graph that a FROM NAMED source's own dereferenced data
+ * already exposes under its own name:
+ * - error: refuse to load the source.
+ * - preferNamed: rewrite this graph's quads into the FROM NAMED graph too, discarding the source's graph.
+ * - keepSource: leave this graph exactly as-is, so the source ends up exposing it alongside the
+ *   FROM NAMED graph.
+ */
+export type DereferenceFromNamedConflictMode = 'error' | 'preferNamed' | 'keepSource';
+
+/**
+ * Resolves, per quad that a FROM NAMED source exposes under a named graph of its own,
+ * whether to error (default), rewrite it into the FROM NAMED graph, or keep it as-is.
+ */
+export type DereferenceFromNamedConflictModeResolver = (quad: RDF.Quad) => DereferenceFromNamedConflictMode;
+
+/**
+ * The RDF variant that determines which term types are allowed in which triple positions.
+ * See KeysInitQuery.rdfVariant .
+ * https://www.w3.org/TR/rdf12-concepts/#section-generalizations-of-rdf
+ * - undefined/ rdf: subjects are IRIs or blank nodes, predicates are IRIs, objects can be any term.
+ * - symmetricRdf: subjects and objects can be any term, predicates are IRIs.
+ * - generalizedRdf: any term is allowed in any position.
+ */
+export type RdfVariant = 'rdf' | 'symmetricRdf' | 'generalizedRdf';
+
+/**
  * Common query context interface
  */
 export interface IQueryContextCommon {
-  // Types of these entries should be aligned with contextKeyShortcuts in ActorInitQueryBase
-  // and Keys in @comunica/context-entries
+  // Types of these entries should be aligned with contextKeyShortcuts in ActorContextPreprocessConvertShortcuts,
+  // Keys in @comunica/context-entries, and possibly the CliArgsHandlers in @comunica/actor-init-query.
 
   // Inherited from RDF.QueryStringContext: sources
   destination?: IDataDestination;
@@ -34,8 +62,12 @@ export interface IQueryContextCommon {
   log?: Logger;
   datetime?: Date;
   // Inherited from RDF.QueryStringContext: queryTimestamp?: Date;
+  queryTimestampHighResolution?: DOMHighResTimeStamp;
   httpProxyHandler?: IProxyHandler;
   lenient?: boolean;
+  serviceAllowFileTargets?: boolean;
+  serviceAllowVariableTargets?: boolean;
+  parseUnsupportedVersions?: boolean;
   httpIncludeCredentials?: boolean;
   httpAuth?: string;
   httpTimeout?: number;
@@ -43,15 +75,36 @@ export interface IQueryContextCommon {
   httpRetryCount?: number;
   httpRetryDelayFallback?: number;
   httpRetryDelayLimit?: number;
+  httpRetryStatusCodes?: number[];
+  httpRetryBodyCount?: number;
+  httpRetryBodyDelayFallback?: number;
+  httpRetryBodyAllowUnsafe?: boolean;
+  httpRetryBodyMaxBytes?: number;
+  httpAbortSignal?: AbortSignal;
+  httpCache?: boolean;
   fetch?: typeof fetch;
+  recoverBrokenLinks?: boolean;
   readOnly?: boolean;
+  extensionFunctions?: Record<string, (args: RDF.Term[]) => Promise<RDF.Term>>;
+  extensionFunctionsAlwaysPushdown?: boolean;
   extensionFunctionCreator?: (functionNamedNode: RDF.NamedNode)
   => ((args: RDF.Term[]) => Promise<RDF.Term>) | undefined;
   functionArgumentsCache?: FunctionArgumentsCache;
-  extensionFunctions?: Record<string, (args: RDF.Term[]) => Promise<RDF.Term>>;
+  serviceExecutors?: Record<string, IServiceExecutor>;
+  serviceExecutorCreator?: ServiceExecutorCreator;
   explain?: QueryExplainMode;
-  recoverBrokenLinks?: boolean;
+  nonLexicalComparison?: boolean;
+  fullTermComparison?: boolean;
+  existenceResolver?: ExistenceResolver;
+  unionDefaultGraph?: boolean;
+  traverse?: boolean;
+  invalidateCache?: boolean;
+  dataFactory?: ComunicaDataFactory;
   distinctConstruct?: boolean;
+  rdfSerializationPrefixes?: Record<string, string>;
+  dereferenceFromNamed?: boolean;
+  dereferenceFromNamedConflictMode?: DereferenceFromNamedConflictModeResolver;
+  rdfVariant?: RdfVariant;
 
   sources: SourceType[];
 }

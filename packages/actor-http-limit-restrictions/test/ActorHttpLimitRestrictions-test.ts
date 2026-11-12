@@ -3,7 +3,7 @@ import type { IActionHttpInvalidate } from '@comunica/bus-http-invalidate';
 import { KeysHttp } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IActionContext, IEndpointRestriction } from '@comunica/types';
-import type { IHostData } from '../lib/ActorHttpLimitRestrictions';
+import type { IHostData, IRequestWindow } from '../lib/ActorHttpLimitRestrictions';
 import { ActorHttpLimitRestrictions } from '../lib/ActorHttpLimitRestrictions';
 import '@comunica/utils-jest';
 
@@ -52,6 +52,17 @@ describe('ActorHttpLimitRestrictions', () => {
       name: 'actor',
       ...args,
     });
+  }
+
+  function hostDataWith(windows: IRequestWindow[]): IHostData {
+    return {
+      windows,
+      maxWindowDuration: Math.max(...windows.map(window => window.duration)),
+      requestTimestamps: [],
+      concurrencyLimit: Number.POSITIVE_INFINITY,
+      activeRequests: 0,
+      pendingRequests: [],
+    };
   }
 
   function contextWith(restrictions: IEndpointRestriction[]): IActionContext {
@@ -119,11 +130,11 @@ describe('ActorHttpLimitRestrictions', () => {
         { type: 'quota', maxValue: 1_000, windowDuration: 86_400_000 },
       ])).toEqual({
         windows: [
-          { limit: 54, duration: 60_000 },
-          { limit: 13, duration: 15_000 },
-          { limit: 900, duration: 86_400_000 },
+          { limit: 54, duration: 66_667 },
+          { limit: 13, duration: 16_667 },
+          { limit: 900, duration: 96_000_000 },
         ],
-        maxWindowDuration: 86_400_000,
+        maxWindowDuration: 96_000_000,
         requestTimestamps: [],
         concurrencyLimit: Number.POSITIVE_INFINITY,
         activeRequests: 0,
@@ -134,13 +145,28 @@ describe('ActorHttpLimitRestrictions', () => {
     it('should allow at least one request per window', () => {
       expect(actor.createHostData([
         { type: 'rate', maxValue: 1, burstValue: 0, windowDuration: 1_000 },
-      ]).windows).toEqual([{ limit: 1, duration: 1_000 }]);
+      ]).windows).toEqual([{ limit: 1, duration: 1_112 }]);
     });
 
     it('should ignore burst values that are not lower than the max value', () => {
       expect(actor.createHostData([
         { type: 'rate', maxValue: 10, burstValue: 10, windowDuration: 1_000 },
-      ]).windows).toEqual([{ limit: 9, duration: 1_000 }]);
+      ]).windows).toEqual([{ limit: 9, duration: 1_112 }]);
+    });
+
+    it('should use the advertised limits without a safety margin', () => {
+      expect(createActor({ safetyMargin: 1 }).createHostData([ rateRestriction ]).windows).toEqual([
+        { limit: 60, duration: 60_000 },
+        { limit: 15, duration: 15_000 },
+      ]);
+    });
+
+    it('should leave time between bursts at window edges', () => {
+      // The endpoint allows 10 requests per 6 seconds, and receives each burst after a varying latency.
+      const hostData = actor.createHostData([{ type: 'rate', maxValue: 10, windowDuration: 6_000 }]);
+      const delays = Array.from({ length: 10 }, () => ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0));
+      expect(delays).toEqual([ 0, 0, 0, 0, 0, 0, 0, 0, 0, 6_667 ]);
+      // The second burst is sent 667ms after the endpoint's window, which tolerates that much latency difference.
     });
 
     it('should use the lowest concurrency limit', () => {
@@ -215,8 +241,7 @@ describe('ActorHttpLimitRestrictions', () => {
     });
 
     it('should delay requests that do not fit within a window', () => {
-      const hostData = actor.createHostData([{ type: 'rate', maxValue: 2, windowDuration: 1_000 }]);
-      hostData.windows[0].limit = 2;
+      const hostData = hostDataWith([{ limit: 2, duration: 1_000 }]);
       expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(0);
       expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(0);
       expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(1_000);
@@ -226,8 +251,7 @@ describe('ActorHttpLimitRestrictions', () => {
     });
 
     it('should respect all windows', () => {
-      const hostData = actor.createHostData([{ type: 'rate', maxValue: 4, burstValue: 2, windowDuration: 4_000 }]);
-      hostData.windows = [{ limit: 4, duration: 4_000 }, { limit: 2, duration: 2_000 }];
+      const hostData = hostDataWith([{ limit: 4, duration: 4_000 }, { limit: 2, duration: 2_000 }]);
       expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(0);
       expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(0);
       expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(2_000);
@@ -236,8 +260,7 @@ describe('ActorHttpLimitRestrictions', () => {
     });
 
     it('should forget requests outside all windows', () => {
-      const hostData = actor.createHostData([{ type: 'rate', maxValue: 2, windowDuration: 1_000 }]);
-      hostData.windows[0].limit = 2;
+      const hostData = hostDataWith([{ limit: 2, duration: 1_000 }]);
       expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(0);
       expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 500)).toBe(0);
       expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 1_200)).toBe(0);
@@ -336,9 +359,9 @@ describe('ActorHttpLimitRestrictions', () => {
       await actor.run({ context, input: url });
       await actor.run({ context, input: url });
       expect(globalThis.setTimeout).toHaveBeenCalledTimes(1);
-      expect(globalThis.setTimeout).toHaveBeenNthCalledWith(1, expect.any(Function), 1_000);
+      expect(globalThis.setTimeout).toHaveBeenNthCalledWith(1, expect.any(Function), 1_112);
       expect(mediatorHttp.mediate).toHaveBeenCalledTimes(2);
-      expect(actorHostData.get(host)!.requestTimestamps).toEqual([ 0, 1_000 ]);
+      expect(actorHostData.get(host)!.requestTimestamps).toEqual([ 0, 1_112 ]);
     });
 
     it('should limit the number of concurrent requests until bodies are consumed', async() => {

@@ -11,7 +11,7 @@ This actor only acts on requests whose context contains endpoint restrictions (`
 which query sources such as SPARQL endpoints set for their own requests.
 Restrictions are tracked per host:
 
-* **Rate and quota restrictions** limit the number of requests to `maxValue` (reduced by the safety margin) within any `windowDuration`. If a `burstValue` is given, at most `burstValue` requests are sent within the time they would take at the steady rate. Requests that do not fit are delayed.
+* **Rate and quota restrictions** limit the number of requests to `maxValue` within any `windowDuration`. If a `burstValue` is given, at most `burstValue` requests are sent within the time they would take at the steady rate. Requests that do not fit are delayed. The safety margin reduces the number of requests and extends the windows, so that requests sent at the edge of a window still arrive within the limit when request latencies vary.
 * **Concurrent request restrictions** limit the number of requests whose response body is still being consumed to `maxValue`.
 * **Response time restrictions** that reject requests set the request timeout (`httpTimeout`) to their `maxValue` seconds (extended by the safety margin), unless a timeout was already set.
 * **Status codes and retry hints** of rate, quota and concurrent request restrictions are added to the retried status codes (`httpRetryStatusCodes`) and set the fallback retry delay (`httpRetryDelayFallback`), unless a fallback delay was already set. These only take effect if retries are enabled (`httpRetryCount`).
@@ -53,6 +53,6 @@ After installing, this package can be added to your engine's configuration as fo
 
 * `mediatorHttp`: A mediator over the [HTTP bus](https://github.com/comunica/comunica/tree/master/packages/bus-http).
 * `httpInvalidator`: A mediator over the [HTTP invalidate bus](https://github.com/comunica/comunica/tree/master/packages/bus-http-invalidate).
-* `safetyMargin`: The fraction of the advertised request limits that may be used, in range ]0.0, 1.0]. Defaults to `0.9`.
+* `safetyMargin`: The fraction of the advertised request limits that may be used, in range ]0.0, 1.0]. The number of requests per window is multiplied by it, and window durations are divided by it. Defaults to `0.9`.
 * `applySoftRestrictions`: If restrictions that are not strictly enforced (`vord:hardRestriction false`) should also be respected. Defaults to `true`.
 * `ignoredScopes`: IRIs of scopes for which restrictions should be ignored, e.g. when the engine is known to fall under a less restrictive scope. Defaults to none.

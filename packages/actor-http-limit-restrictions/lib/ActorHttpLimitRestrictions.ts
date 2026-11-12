@@ -109,9 +109,13 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
   /**
    * Create the request windows and concurrency limit for a host.
    * Each rate or quota restriction leads to a sliding window that allows at most maxValue requests
-   * (reduced by the safety margin) per windowDuration.
+   * per windowDuration.
    * If a burst value is given, an additional window limits bursts to burstValue requests
    * within the time those requests would take at the steady rate.
+   * The safety margin reduces the number of requests per window and extends the duration of each window.
+   * The latter is needed because endpoints count requests when they arrive:
+   * a burst sent exactly one window after the previous one could otherwise arrive within the endpoint's window
+   * if it travels faster than the previous burst did.
    * @param restrictions The applicable restrictions of an endpoint on the host.
    */
   public createHostData(restrictions: IEndpointRestriction[]): IHostData {
@@ -122,15 +126,12 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
         continue;
       }
       if ((restriction.type === 'rate' || restriction.type === 'quota') && restriction.windowDuration) {
-        windows.push({
-          limit: Math.max(1, Math.floor(restriction.maxValue * this.safetyMargin)),
-          duration: restriction.windowDuration,
-        });
+        windows.push(this.createWindow(restriction.maxValue, restriction.windowDuration));
         if (restriction.burstValue && restriction.burstValue > 0 && restriction.burstValue < restriction.maxValue) {
-          windows.push({
-            limit: Math.max(1, Math.floor(restriction.burstValue * this.safetyMargin)),
-            duration: restriction.windowDuration * restriction.burstValue / restriction.maxValue,
-          });
+          windows.push(this.createWindow(
+            restriction.burstValue,
+            restriction.windowDuration * restriction.burstValue / restriction.maxValue,
+          ));
         }
       } else if (restriction.type === 'concurrentRequests') {
         concurrencyLimit = Math.min(concurrencyLimit, restriction.maxValue);
@@ -143,6 +144,18 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
       concurrencyLimit,
       activeRequests: 0,
       pendingRequests: [],
+    };
+  }
+
+  /**
+   * Create a request window with the safety margin applied to an advertised limit.
+   * @param limit The advertised maximum number of requests within the window.
+   * @param duration The advertised duration of the window in milliseconds.
+   */
+  public createWindow(limit: number, duration: number): IRequestWindow {
+    return {
+      limit: Math.max(1, Math.floor(limit * this.safetyMargin)),
+      duration: Math.ceil(duration / this.safetyMargin),
     };
   }
 
@@ -340,7 +353,8 @@ export interface IActorHttpLimitRestrictionsArgs extends IActorHttpArgs {
   /* eslint-enable max-len */
   /**
    * The fraction of the advertised request limits that may be used, in range ]0.0, 1.0].
-   * This compensates for clock differences and requests that are not sent by this engine.
+   * The number of requests per window is multiplied by it, and the window duration is divided by it.
+   * This compensates for varying request latencies, clock differences, and requests that are not sent by this engine.
    * @range {float}
    * @default {0.9}
    */

@@ -57,8 +57,11 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
       this.hostData.set(requestUrl.host, hostData);
     }
 
+    // Requests that are aborted while waiting are dropped, so that they do not occupy a slot or request time.
+    const signal = ActorHttpLimitRestrictions.getAbortSignal(action);
+
     // Wait for a free slot if the number of concurrent requests is limited.
-    await ActorHttpLimitRestrictions.acquireSlot(hostData);
+    await ActorHttpLimitRestrictions.acquireSlot(hostData, signal);
     let released = false;
     const release = (): void => {
       if (!released) {
@@ -68,14 +71,22 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
     };
 
     try {
+      signal?.throwIfAborted();
+
       // Wait until the request fits within all request windows.
-      const delay = ActorHttpLimitRestrictions.reserveRequestTime(hostData, Date.now());
+      const now = Date.now();
+      const delay = ActorHttpLimitRestrictions.reserveRequestTime(hostData, now);
       if (delay > 0) {
         this.logDebug(action.context, 'Delaying request to respect endpoint restrictions', () => ({
           url: requestUrl.href,
           delay,
         }));
-        await new Promise(resolve => setTimeout(resolve, delay));
+        try {
+          await ActorHttpLimitRestrictions.sleep(delay, signal);
+        } catch (error: unknown) {
+          ActorHttpLimitRestrictions.cancelRequestTime(hostData, now + delay);
+          throw error;
+        }
       }
 
       const response = await this.mediatorHttp.mediate({
@@ -238,16 +249,45 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
   }
 
   /**
+   * Cancel a reserved request time, so that it no longer counts towards the request windows of a host.
+   * Removing a request never makes the requests that were reserved after it exceed a window.
+   * @param hostData The data of a host.
+   * @param requestTime The reserved request time.
+   */
+  public static cancelRequestTime(hostData: IHostData, requestTime: number): void {
+    const index = hostData.requestTimestamps.lastIndexOf(requestTime);
+    if (index >= 0) {
+      hostData.requestTimestamps.splice(index, 1);
+    }
+  }
+
+  /**
    * Wait until a request slot is available for the given host.
    * @param hostData The data of a host.
+   * @param signal An optional signal that aborts the wait, and removes the request from the waiting requests.
    */
-  public static async acquireSlot(hostData: IHostData): Promise<void> {
+  public static async acquireSlot(hostData: IHostData, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (hostData.activeRequests < hostData.concurrencyLimit) {
       hostData.activeRequests++;
       return;
     }
     // The slot is handed over directly by the request that releases it.
-    await new Promise<void>(resolve => hostData.pendingRequests.push(resolve));
+    await new Promise<void>((resolve, reject) => {
+      let onAbort: (() => void) | undefined;
+      const handOver = (): void => {
+        signal?.removeEventListener('abort', onAbort!);
+        resolve();
+      };
+      hostData.pendingRequests.push(handOver);
+      if (signal) {
+        onAbort = () => {
+          hostData.pendingRequests.splice(hostData.pendingRequests.indexOf(handOver), 1);
+          reject(signal.reason);
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
   }
 
   /**
@@ -261,6 +301,41 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
     } else {
       hostData.activeRequests--;
     }
+  }
+
+  /**
+   * Wait for the given time, unless the given signal aborts first.
+   * @param ms The number of milliseconds to wait.
+   * @param signal An optional signal that aborts the wait.
+   */
+  public static async sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      let onAbort: (() => void) | undefined;
+      const timeout = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort!);
+        resolve();
+      }, ms);
+      if (signal) {
+        onAbort = () => {
+          clearTimeout(timeout);
+          reject(signal.reason);
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+
+  /**
+   * Get the signal with which the caller can abort the given request, if any.
+   * @param action An HTTP action.
+   */
+  public static getAbortSignal(action: IActionHttp): AbortSignal | undefined {
+    const requestSignal = action.init?.signal ?? undefined;
+    const contextSignal = action.context.get(KeysHttp.httpAbortSignal);
+    if (requestSignal && contextSignal) {
+      return AbortSignal.any([ requestSignal, contextSignal ]);
+    }
+    return requestSignal ?? contextSignal;
   }
 
   /**

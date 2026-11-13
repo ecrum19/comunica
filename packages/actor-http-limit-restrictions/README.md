@@ -17,6 +17,7 @@ Restrictions are tracked per host:
 * **Status codes and retry hints** of rate, quota and concurrent request restrictions are added to the retried status codes (`httpRetryStatusCodes`) and set the fallback retry delay (`httpRetryDelayFallback`), unless a fallback delay was already set. These only take effect if retries are enabled (`httpRetryCount`).
 
 If an endpoint advertises multiple restrictions of the same kind (e.g. for different scopes), all of them are respected, so the most restrictive one applies.
+Requests that are aborted while they wait (via `httpAbortSignal` or their own signal) are dropped, so they do not take up the time or slot of other requests.
 
 This module is part of the [Comunica framework](https://github.com/comunica/comunica),
 and should only be used by [developers that want to build their own query engine](https://comunica.dev/docs/modify/).

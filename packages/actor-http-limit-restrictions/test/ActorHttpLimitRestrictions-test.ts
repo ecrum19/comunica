@@ -268,6 +268,24 @@ describe('ActorHttpLimitRestrictions', () => {
     });
   });
 
+  describe('cancelRequestTime', () => {
+    it('should free the reserved time for later requests', () => {
+      const hostData = hostDataWith([{ limit: 1, duration: 1_000 }]);
+      expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(0);
+      expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(1_000);
+      ActorHttpLimitRestrictions.cancelRequestTime(hostData, 1_000);
+      expect(hostData.requestTimestamps).toEqual([ 0 ]);
+      expect(ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0)).toBe(1_000);
+    });
+
+    it('should ignore unknown request times', () => {
+      const hostData = hostDataWith([{ limit: 1, duration: 1_000 }]);
+      ActorHttpLimitRestrictions.reserveRequestTime(hostData, 0);
+      ActorHttpLimitRestrictions.cancelRequestTime(hostData, 500);
+      expect(hostData.requestTimestamps).toEqual([ 0 ]);
+    });
+  });
+
   describe('acquireSlot and releaseSlot', () => {
     it('should hand over slots to waiting requests', async() => {
       const hostData = actor.createHostData([ concurrencyRestriction ]);
@@ -289,6 +307,83 @@ describe('ActorHttpLimitRestrictions', () => {
 
       ActorHttpLimitRestrictions.releaseSlot(hostData);
       expect(hostData.activeRequests).toBe(0);
+    });
+
+    it('should not acquire slots for aborted requests', async() => {
+      const hostData = actor.createHostData([ concurrencyRestriction ]);
+      await expect(ActorHttpLimitRestrictions.acquireSlot(hostData, AbortSignal.abort(new Error('aborted'))))
+        .rejects.toThrow('aborted');
+      expect(hostData.activeRequests).toBe(0);
+    });
+
+    it('should stop waiting for a slot when aborted', async() => {
+      const hostData = actor.createHostData([ concurrencyRestriction ]);
+      await ActorHttpLimitRestrictions.acquireSlot(hostData);
+      const controller = new AbortController();
+      const aborted = ActorHttpLimitRestrictions.acquireSlot(hostData, controller.signal);
+      const waiting = ActorHttpLimitRestrictions.acquireSlot(hostData);
+      expect(hostData.pendingRequests).toHaveLength(2);
+
+      controller.abort(new Error('aborted'));
+      await expect(aborted).rejects.toThrow('aborted');
+      expect(hostData.pendingRequests).toHaveLength(1);
+
+      ActorHttpLimitRestrictions.releaseSlot(hostData);
+      await waiting;
+      expect(hostData.activeRequests).toBe(1);
+    });
+
+    it('should not abort requests that already received a slot', async() => {
+      const hostData = actor.createHostData([ concurrencyRestriction ]);
+      await ActorHttpLimitRestrictions.acquireSlot(hostData);
+      const controller = new AbortController();
+      const pending = ActorHttpLimitRestrictions.acquireSlot(hostData, controller.signal);
+      ActorHttpLimitRestrictions.releaseSlot(hostData);
+      controller.abort(new Error('aborted'));
+      await expect(pending).resolves.toBeUndefined();
+      expect(hostData.activeRequests).toBe(1);
+    });
+  });
+
+  describe('sleep', () => {
+    it('should wait for the given time', async() => {
+      await expect(ActorHttpLimitRestrictions.sleep(1)).resolves.toBeUndefined();
+      await expect(ActorHttpLimitRestrictions.sleep(1, new AbortController().signal)).resolves.toBeUndefined();
+    });
+
+    it('should stop waiting when aborted', async() => {
+      const controller = new AbortController();
+      const sleep = ActorHttpLimitRestrictions.sleep(60_000, controller.signal);
+      controller.abort(new Error('aborted'));
+      await expect(sleep).rejects.toThrow('aborted');
+    });
+  });
+
+  describe('getAbortSignal', () => {
+    it('should return undefined without signals', () => {
+      expect(ActorHttpLimitRestrictions.getAbortSignal({ context: new ActionContext(), input: url })).toBeUndefined();
+    });
+
+    it('should return the signal of the request or the context', () => {
+      const signal = new AbortController().signal;
+      expect(ActorHttpLimitRestrictions.getAbortSignal({ context: new ActionContext(), input: url, init: { signal }}))
+        .toBe(signal);
+      expect(ActorHttpLimitRestrictions.getAbortSignal({
+        context: new ActionContext({ [KeysHttp.httpAbortSignal.name]: signal }),
+        input: url,
+      })).toBe(signal);
+    });
+
+    it('should combine the signals of the request and the context', () => {
+      const controller = new AbortController();
+      const signal = ActorHttpLimitRestrictions.getAbortSignal({
+        context: new ActionContext({ [KeysHttp.httpAbortSignal.name]: controller.signal }),
+        input: url,
+        init: { signal: new AbortController().signal },
+      })!;
+      expect(signal.aborted).toBeFalsy();
+      controller.abort();
+      expect(signal.aborted).toBeTruthy();
     });
   });
 
@@ -382,6 +477,46 @@ describe('ActorHttpLimitRestrictions', () => {
       expect(mediatorHttp.mediate).toHaveBeenCalledTimes(2);
       await expect(response2!.text()).resolves.toBe('body');
       expect(actorHostData.get(host)!.activeRequests).toBe(0);
+    });
+
+    it('should not send or reserve time for aborted requests', async() => {
+      const context = contextWith([ rateRestriction, concurrencyRestriction ]);
+      await expect(actor.run({ context, input: url, init: { signal: AbortSignal.abort(new Error('aborted')) }}))
+        .rejects.toThrow('aborted');
+      expect(mediatorHttp.mediate).not.toHaveBeenCalled();
+      expect(actorHostData.get(host)!.requestTimestamps).toEqual([]);
+      expect(actorHostData.get(host)!.activeRequests).toBe(0);
+    });
+
+    it('should release the slot of requests that are aborted when they receive it', async() => {
+      jest.spyOn(mediatorHttp, 'mediate').mockImplementation(async() => new Response('body'));
+      const context = contextWith([ concurrencyRestriction ]);
+      await actor.run({ context, input: url });
+      const controller = new AbortController();
+      const pending = actor.run({ context, input: url, init: { signal: controller.signal }});
+      await new Promise(setImmediate);
+
+      ActorHttpLimitRestrictions.releaseSlot(actorHostData.get(host)!);
+      controller.abort(new Error('aborted'));
+      await expect(pending).rejects.toThrow('aborted');
+      expect(mediatorHttp.mediate).toHaveBeenCalledTimes(1);
+      expect(actorHostData.get(host)!.activeRequests).toBe(0);
+    });
+
+    it('should cancel the reserved time of requests that are aborted while delayed', async() => {
+      jest.spyOn(mediatorHttp, 'mediate').mockImplementation(async() => new Response('body'));
+      const context = contextWith([{ type: 'rate', maxValue: 1, windowDuration: 1_000 }]);
+      await actor.run({ context, input: url });
+      jest.spyOn(globalThis, 'setTimeout').mockImplementation(<any> (() => 0));
+      const controller = new AbortController();
+      const pending = actor.run({ context, input: url, init: { signal: controller.signal }});
+      await new Promise(setImmediate);
+      expect(actorHostData.get(host)!.requestTimestamps).toEqual([ 0, 1_112 ]);
+
+      controller.abort(new Error('aborted'));
+      await expect(pending).rejects.toThrow('aborted');
+      expect(mediatorHttp.mediate).toHaveBeenCalledTimes(1);
+      expect(actorHostData.get(host)!.requestTimestamps).toEqual([ 0 ]);
     });
 
     it('should release slots of failed requests', async() => {

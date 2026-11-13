@@ -367,14 +367,18 @@ export class QuerySourceSparql implements IQuerySource {
     const page = await this.queryBindingsRemote(this.url, pageQuery, variables, context, undefVariables);
 
     let pageResults = 0;
-    return page
+    const nextPages = new TransformIterator<RDF.Bindings>(async() => pageResults === pageSize ?
+      this.queryBindingsPaged(operation, variables, context, undefVariables, pageSize, offset + pageSize) :
+      new ArrayIterator<RDF.Bindings>([], { autoStart: false }), { autoStart: false });
+    const results = page
       .map((bindings) => {
         pageResults++;
         return bindings;
       })
-      .append(new TransformIterator<RDF.Bindings>(async() => pageResults === pageSize ?
-        this.queryBindingsPaged(operation, variables, context, undefVariables, pageSize, offset + pageSize) :
-        new ArrayIterator<RDF.Bindings>([], { autoStart: false }), { autoStart: false }));
+      .append(nextPages);
+    // Appended iterators do not forward their errors, such as failed requests for later pages.
+    nextPages.on('error', error => results.destroy(error));
+    return results;
   }
 
   /**
@@ -463,22 +467,33 @@ export class QuerySourceSparql implements IQuerySource {
         }
 
         // Abort the count request on timeout, so that it does not keep occupying the endpoint.
-        const abortController = new AbortController();
-        const existingAbortSignal = context.get(KeysHttp.httpAbortSignal);
-        const countContext = context.set(
-          KeysHttp.httpAbortSignal,
-          existingAbortSignal ?
-            AbortSignal.any([ existingAbortSignal, abortController.signal ]) :
-            abortController.signal,
-        );
-        const timeoutHandler = setTimeout(() => {
-          resolve({
-            type: 'estimate',
-            value: Number.POSITIVE_INFINITY,
-            dataset: this.url,
-          });
-          abortController.abort();
-        }, this.countTimeout);
+        let countContext: IActionContext;
+        let timeoutHandler: NodeJS.Timeout | undefined;
+        if (this.restrictions) {
+          // Requests to endpoints with restrictions may be delayed to respect them,
+          // so the timeout of the count request only starts once it is sent.
+          const httpTimeout = context.get(KeysHttp.httpTimeout) ?? this.countTimeout;
+          countContext = context
+            .set(KeysHttp.httpTimeout, Math.min(httpTimeout, this.countTimeout))
+            .set(KeysHttp.httpBodyTimeout, true);
+        } else {
+          const abortController = new AbortController();
+          const existingAbortSignal = context.get(KeysHttp.httpAbortSignal);
+          countContext = context.set(
+            KeysHttp.httpAbortSignal,
+            existingAbortSignal ?
+              AbortSignal.any([ existingAbortSignal, abortController.signal ]) :
+              abortController.signal,
+          );
+          timeoutHandler = setTimeout(() => {
+            resolve({
+              type: 'estimate',
+              value: Number.POSITIVE_INFINITY,
+              dataset: this.url,
+            });
+            abortController.abort();
+          }, this.countTimeout);
+        }
         const varCount = this.dataFactory.variable('count');
         const bindingsStream: BindingsStream = await this
           .queryBindingsRemote(this.url, countQuery, [ varCount ], countContext, []);

@@ -3365,6 +3365,60 @@ describe('QuerySourceSparql', () => {
       expect(getQueries(mediator)[0]).not.toContain('OFFSET');
     });
 
+    it('should emit an error if a later page fails', async() => {
+      const pagingMediator = createPagingMediator(5);
+      const mediator = {
+        mediate: jest.fn()
+          .mockImplementationOnce((action: any) => pagingMediator.mediate(action))
+          .mockRejectedValueOnce(new Error('page error')),
+      };
+      source = createSource(mediator, { restrictions: [ resultRestriction ]});
+      await expect(source.queryBindings(pattern, ctx).toArray()).rejects.toThrow('page error');
+      expect(mediator.mediate).toHaveBeenCalledTimes(2);
+    });
+
+    it('should start the timeout of count requests once they are sent', async() => {
+      jest.useFakeTimers();
+      let rejectCount: (error: Error) => void;
+      const mediator: any = {
+        mediate: jest.fn(() => new Promise((_, reject) => {
+          rejectCount = reject;
+        })),
+      };
+      source = createSource(mediator, { restrictions: [ looseRateRestriction ]}, true, true);
+      const stream = source.queryBindings(pattern, ctx);
+      let metadata: any;
+      stream.getProperty('metadata', (value) => {
+        metadata = value;
+      });
+      await jest.advanceTimersByTimeAsync(20_000);
+      expect(metadata).toBeUndefined();
+      const countContext: IActionContext = mediator.mediate.mock.calls[0][0].context;
+      expect(countContext.get(KeysHttp.httpTimeout)).toBe(10_000);
+      expect(countContext.get(KeysHttp.httpBodyTimeout)).toBe(true);
+      expect(countContext.has(KeysHttp.httpAbortSignal)).toBeFalsy();
+
+      rejectCount!(Object.assign(new Error('timed out'), { name: 'TimeoutError' }));
+      await jest.advanceTimersByTimeAsync(0);
+      expect(metadata).toEqual({
+        state: expect.any(MetadataValidationState),
+        cardinality: { type: 'estimate', value: Number.POSITIVE_INFINITY, dataset: url },
+        requestTime: 1_000,
+        variables: [{ variable: DF.variable('p'), canBeUndef: false }],
+      });
+      jest.useRealTimers();
+    });
+
+    it('should keep a lower HTTP timeout for count requests', async() => {
+      const mediator = createPagingMediator(3);
+      source = createSource(mediator, { restrictions: [ looseRateRestriction ]}, true, true);
+      const stream = source.queryBindings(pattern, ctx.set(KeysHttp.httpTimeout, 5_000));
+      await expect(stream).toEqualBindingsStream(expectedBindings(3));
+      const countCall = mediator.mediate.mock.calls
+        .find((call: any) => isCountQuery(new URLSearchParams(call[0].init.body.toString()).get('query')!));
+      expect(countCall[0].context.get(KeysHttp.httpTimeout)).toBe(5_000);
+    });
+
     it('should emit the request time and skip count queries for strict rate limits', async() => {
       const mediator = createPagingMediator(3);
       source = createSource(mediator, { restrictions: [ strictRateRestriction ]}, true, true);

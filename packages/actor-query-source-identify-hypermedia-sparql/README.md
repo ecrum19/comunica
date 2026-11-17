@@ -52,6 +52,14 @@ After installing, this package can be added to your engine's configuration as fo
 * `cardinalityCountQueries`: If count queries should be sent to obtain the cardinality of (sub)queries. If set to false, resulting cardinalities will always be considered infinity. Defaults to `true`
 * `cardinalityEstimateConstruction`: If cardinality estimates for larger queries should be constructed locally from (sub)query cardinalities when possible. Defaults to `false`. If set to false, count queries will be sent for every operation at all levels.
 * `sparqlServerSoftwarePatterns`: An optional list of regular expressions to match against the `Server` HTTP response header. If a match is found, the source is identified as a SPARQL endpoint.
+* `restrictionAwarePlanning`: If the restrictions of endpoints (see below) should be taken into account when querying them: results are requested in pages if they would be truncated, the minimal time between requests is exposed to the query planner, and count queries are skipped if that time is longer than `countTimeout`. Defaults to `true`.
+
+## Endpoint restrictions
+
+Endpoints can advertise restrictions, such as rate limits and maximum result sizes, in their service description using the [VoRD vocabulary](https://w3id.org/vord#), which [`@comunica/actor-rdf-metadata-extract-vord`](https://github.com/comunica/comunica/tree/master/packages/actor-rdf-metadata-extract-vord) extracts.
+Users can also provide restrictions for endpoints in the `endpointRestrictions` context entry (see [`@comunica/actor-context-preprocess-endpoint-restrictions`](https://github.com/comunica/comunica/tree/master/packages/actor-context-preprocess-endpoint-restrictions)).
+Provided restrictions replace the advertised ones of the same endpoint.
+This actor passes the restrictions of an endpoint to its requests, so that [`@comunica/actor-http-limit-restrictions`](https://github.com/comunica/comunica/tree/master/packages/actor-http-limit-restrictions) can respect them.
 
 ## Endpoint Server Header Report
 

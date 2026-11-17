@@ -181,4 +181,39 @@ WHERE {
       ]);
     });
   });
+
+  describe('endpoint restrictions', () => {
+    it('should respect restrictions provided in a local VoRD description', async() => {
+      // An endpoint that truncates every response to 2 results, out of 5.
+      const queries: string[] = [];
+      const fetch = async(input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const query = init?.body ?
+          new URLSearchParams(String(init.body)).get('query')! :
+          new URL(input instanceof Request ? input.url : String(input)).searchParams.get('query')!;
+        queries.push(query);
+        const offset = Number(/OFFSET (\d+)/u.exec(query)?.[1] ?? 0);
+        const bindings = [];
+        for (let i = offset; i < Math.min(5, offset + 2); i++) {
+          bindings.push({ o: { type: 'uri', value: `http://example.org/o${i}` }});
+        }
+        return new Response(
+          JSON.stringify({ head: { vars: [ 'o' ]}, results: { bindings }}),
+          { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' }},
+        );
+      };
+      const context: QueryStringContext = {
+        sources: [{ type: 'sparql', value: 'http://restricted.example.org/sparql' }],
+        fetch,
+        endpointRestrictions: {
+          'http://restricted.example.org/sparql':
+            path.join(path.relative(process.cwd(), __dirname), 'assets/vord-restrictions.ttl'),
+        },
+      };
+      const query = 'SELECT ?o WHERE { <http://example.org/s> <http://example.org/p> ?o }';
+
+      const bindings = await arrayifyStream(await engine.queryBindings(query, context));
+      expect(bindings).toHaveLength(5);
+      expect(queries).toHaveLength(3);
+    });
+  });
 });

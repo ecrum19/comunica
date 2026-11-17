@@ -87,3 +87,49 @@ export interface IEndpointRestriction {
    */
   costModel?: string;
 }
+
+/**
+ * An endpoint restriction as given by users in the `endpointRestrictions` context entry.
+ * It has the same fields as {@link IEndpointRestriction}, with these differences:
+ * - `type` is optional if it follows from the metric (e.g. `vord:requestsPerWindow` gives `rate`),
+ *   and may also be a VoRD restriction class, such as `vord:RateRestriction`.
+ * - `windowDuration` and `retryAfterHint` are either milliseconds or xsd:duration strings, such as `PT1M`.
+ * - `enforcement` may also be a VoRD enforcement mode, such as `vord:RejectRequest`.
+ * - IRIs of VoRD terms (`metric`, `unit`, `scope`, `costModel`) may use the `vord:` prefix.
+ */
+export interface IEndpointRestrictionInput {
+  /**
+   * The kind of restriction: `rate`, `quota`, `resultSize`, `costModel`, `serverLoad`, `concurrentRequests`,
+   * `responseTime` or `other`, or a VoRD restriction class.
+   */
+  type?: string;
+  metric?: string;
+  maxValue?: number;
+  minValue?: number;
+  burstValue?: number;
+  unit?: string;
+  /**
+   * In milliseconds, or as an xsd:duration string.
+   */
+  windowDuration?: number | string;
+  /**
+   * In milliseconds, or as an xsd:duration string.
+   */
+  retryAfterHint?: number | string;
+  returnsStatusCode?: number;
+  httpSignalHeader?: string;
+  scope?: string;
+  /**
+   * `reject`, `truncate`, `queue`, `throttle`, `degrade` or `other`, or a VoRD enforcement mode.
+   */
+  enforcement?: string;
+  hardRestriction?: boolean;
+  costModel?: string;
+}
+
+/**
+ * Restrictions of endpoints that users provide, keyed by endpoint URL.
+ * Each value is either the path or URL of an RDF document that describes the restrictions of the endpoint with VoRD,
+ * like a SPARQL service description, or a list of restrictions.
+ */
+export type EndpointRestrictionsInput = Record<string, string | IEndpointRestrictionInput[]>;

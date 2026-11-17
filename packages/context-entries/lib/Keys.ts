@@ -20,6 +20,7 @@ import type {
   ComunicaDataFactory,
   IStatisticBase,
   IDiscoverEventData,
+  EndpointRestrictionsInput,
   IEndpointRestriction,
   IServiceExecutor,
   ServiceExecutorCreator,
@@ -502,6 +503,24 @@ export const KeysQuerySourceIdentify = {
    * This means that sources annotated with this flag are considered incomplete until all links have been traversed.
    */
   traverse: new ActionContextKey<boolean>('@comunica/bus-query-source-identify:traverse'),
+  /**
+   * Restrictions of endpoints, such as rate limits, that are known to users but not (correctly) advertised by the
+   * endpoints, keyed by endpoint URL.
+   * Each value is either the path or URL of an RDF document that describes the restrictions with VoRD,
+   * or a list of restrictions.
+   * These restrictions replace the ones that the endpoint advertises.
+   */
+  endpointRestrictions: new ActionContextKey<EndpointRestrictionsInput>(
+    '@comunica/bus-query-source-identify:endpointRestrictions',
+  ),
+  /**
+   * The restrictions of endpoints that users provided via endpointRestrictions, keyed by normalized endpoint URL,
+   * after documents have been read and restrictions have been validated.
+   * This is set during context preprocessing, and is not meant to be set by users.
+   */
+  endpointRestrictionsResolved: new ActionContextKey<Record<string, IEndpointRestriction[]>>(
+    '@comunica/bus-query-source-identify:endpointRestrictionsResolved',
+  ),
 };
 
 export const KeysDereference = {

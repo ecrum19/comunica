@@ -10,10 +10,10 @@ import type {
 import {
   ActorQuerySourceIdentifyHypermedia,
 } from '@comunica/bus-query-source-identify-hypermedia';
-import { KeysInitQuery, KeysQueryOperation } from '@comunica/context-entries';
+import { KeysInitQuery, KeysQueryOperation, KeysQuerySourceIdentify } from '@comunica/context-entries';
 import type { TestResult } from '@comunica/core';
 import { failTest, passTest } from '@comunica/core';
-import type { ComunicaDataFactory } from '@comunica/types';
+import type { ComunicaDataFactory, IActionContext, IEndpointRestriction } from '@comunica/types';
 import { AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
 import { QuerySourceSparql } from './QuerySourceSparql';
@@ -86,8 +86,23 @@ export class ActorQuerySourceIdentifyHypermediaSparql extends ActorQuerySourceId
     const dataFactory: ComunicaDataFactory = action.context.getSafe(KeysInitQuery.dataFactory);
     const algebraFactory = new AlgebraFactory(dataFactory);
     const isSingularSource = action.context.get(KeysQueryOperation.querySources)?.length === 1;
+    const url = (action.forceSourceType ?? this.forceSourceType) ?
+      action.url :
+      action.metadata.sparqlService || action.url;
+
+    // Restrictions that users provide for the endpoint replace the ones it advertises.
+    let metadata = action.metadata;
+    const providedRestrictions = ActorQuerySourceIdentifyHypermediaSparql
+      .getProvidedRestrictions(action.context, [ url, action.url ]);
+    if (providedRestrictions) {
+      this.logInfo(action.context, `Using the restrictions provided for ${url} instead of the advertised ones`, () => ({
+        restrictions: providedRestrictions,
+      }));
+      metadata = { ...metadata, restrictions: providedRestrictions };
+    }
+
     const source = new QuerySourceSparql(
-      (action.forceSourceType ?? this.forceSourceType) ? action.url : action.metadata.sparqlService || action.url,
+      url,
       // Pass the original URL as backup, as some endpoints misconfigure their endpoint URL in the service description.
       action.url,
       action.context,
@@ -105,10 +120,41 @@ export class ActorQuerySourceIdentifyHypermediaSparql extends ActorQuerySourceId
       this.cardinalityEstimateConstruction,
       this.forceGetIfUrlLengthBelow,
       Boolean(action.context.get(KeysInitQuery.parseUnsupportedVersions)),
-      action.metadata,
+      metadata,
       this.restrictionAwarePlanning,
     );
     return { source };
+  }
+
+  /**
+   * Determine the restrictions that users provided for an endpoint in the endpointRestrictions context entry.
+   * @param context The context.
+   * @param urls The URLs by which the endpoint may be identified, in order of preference.
+   * @return The provided restrictions, or undefined if none were provided for the endpoint.
+   */
+  public static getProvidedRestrictions(context: IActionContext, urls: string[]): IEndpointRestriction[] | undefined {
+    const providedRestrictions = context.get(KeysQuerySourceIdentify.endpointRestrictionsResolved);
+    if (providedRestrictions) {
+      for (const url of urls) {
+        const restrictions = providedRestrictions[ActorQuerySourceIdentifyHypermediaSparql.normalizeUrl(url)];
+        if (restrictions) {
+          return restrictions;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Normalize a URL, so that equivalent URLs of the same endpoint match.
+   * @param url A URL.
+   */
+  public static normalizeUrl(url: string): string {
+    try {
+      return new URL(url).href;
+    } catch {
+      return url;
+    }
   }
 }
 

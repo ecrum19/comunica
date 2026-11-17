@@ -9,6 +9,8 @@ such as those described using the [VoRD vocabulary](https://w3id.org/vord#)
 
 This actor only acts on requests whose context contains endpoint restrictions (`KeysHttp.endpointRestrictions`),
 which query sources such as SPARQL endpoints set for their own requests.
+These are the restrictions that the endpoint advertises, or the ones that users provide in the `endpointRestrictions`
+context entry (see [`@comunica/actor-context-preprocess-endpoint-restrictions`](https://github.com/comunica/comunica/tree/master/packages/actor-context-preprocess-endpoint-restrictions)).
 Restrictions are tracked per host:
 
 * **Rate and quota restrictions** limit the number of requests to `maxValue` within any `windowDuration`. If a `burstValue` is given, at most `burstValue` requests are sent within the time they would take at the steady rate. Requests that do not fit are delayed. The safety margin reduces the number of requests and extends the windows, so that requests sent at the edge of a window still arrive within the limit when request latencies vary.

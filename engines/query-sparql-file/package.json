@@ -70,6 +70,7 @@
     "@comunica/actor-bindings-aggregator-factory-sum": "^5.4.0",
     "@comunica/actor-bindings-aggregator-factory-wildcard-count": "^5.4.0",
     "@comunica/actor-context-preprocess-convert-shortcuts": "^5.4.0",
+    "@comunica/actor-context-preprocess-endpoint-restrictions": "^5.4.0",
     "@comunica/actor-context-preprocess-set-defaults": "^5.4.0",
     "@comunica/actor-context-preprocess-source-to-destination": "^5.4.0",
     "@comunica/actor-dereference-fallback": "^5.4.0",

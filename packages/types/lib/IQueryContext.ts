@@ -2,6 +2,7 @@ import type * as RDF from '@rdfjs/types';
 import type { ComunicaDataFactory } from './ComunicaDataFactory';
 import type { ExistenceResolver, FunctionArgumentsCache } from './ExpressionEvaluator';
 import type { IDataDestination } from './IDataDestination';
+import type { EndpointRestrictionsInput } from './IEndpointRestriction';
 import type { IProxyHandler } from './IProxyHandler';
 import type { SourceType } from './IQueryEngine';
 import type { QueryExplainMode } from './IQueryOperationResult';
@@ -82,6 +83,7 @@ export interface IQueryContextCommon {
   httpRetryBodyMaxBytes?: number;
   httpAbortSignal?: AbortSignal;
   httpCache?: boolean;
+  endpointRestrictions?: EndpointRestrictionsInput;
   fetch?: typeof fetch;
   recoverBrokenLinks?: boolean;
   readOnly?: boolean;

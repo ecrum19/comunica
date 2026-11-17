@@ -11,6 +11,8 @@ Restrictions are linked to the `sd:Service` that applies to the requested URL vi
 or via `sd:feature` if they are typed as `vord:Restriction`.
 If no service in the document applies to the requested URL, the restrictions of the only service with restrictions are used.
 
+For endpoints that do not advertise their restrictions, users can provide them in the `endpointRestrictions` context entry, as objects or as a VoRD document that is read in the same way (see [`@comunica/actor-context-preprocess-endpoint-restrictions`](https://github.com/comunica/comunica/tree/master/packages/actor-context-preprocess-endpoint-restrictions)).
+
 This module is part of the [Comunica framework](https://github.com/comunica/comunica),
 and should only be used by [developers that want to build their own query engine](https://comunica.dev/docs/modify/).
 

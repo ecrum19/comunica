@@ -1,0 +1,13 @@
+@prefix sd: <http://www.w3.org/ns/sparql-service-description#> .
+@prefix vord: <https://w3id.org/vord#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# Restrictions of an endpoint that does not advertise them itself.
+[] a sd:Service ;
+  sd:endpoint <http://restricted.example.org/sparql> ;
+  vord:hasRestriction [
+    a vord:ResultSizeRestriction ;
+    vord:metric vord:resultBindings ;
+    vord:maxValue 2 ;
+    vord:enforcement vord:TruncateResult
+  ] .

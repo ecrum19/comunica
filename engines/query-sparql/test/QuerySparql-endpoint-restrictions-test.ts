@@ -152,3 +152,78 @@ describe('System test: QuerySparql with a forced SPARQL endpoint that advertises
     expect(requests).toHaveLength(3);
   }, 60_000);
 });
+
+describe('System test: QuerySparql with endpoint restrictions provided by the user', () => {
+  const query = 'SELECT ?o WHERE { <http://example.org/s> <http://example.org/p> ?o }';
+  let engine: QueryEngine;
+
+  beforeAll(() => {
+    engine = new QueryEngine();
+  });
+
+  it('respects restrictions provided as objects for an endpoint without service description', async() => {
+    const endpoint = 'http://provided-objects.example.org/sparql';
+    const requests: IEndpointRequest[] = [];
+    const bindings = await (await engine.queryBindings(query, {
+      sources: [{ type: 'sparql', value: endpoint }],
+      fetch: createEndpointFetch(createServiceDescription(endpoint, ''), 5, 2, requests),
+      endpointRestrictions: {
+        [endpoint]: [
+          { type: 'resultSize', maxValue: 2, enforcement: 'truncate' },
+          { type: 'rate', maxValue: 1, windowDuration: 'PT0.2S' },
+        ],
+      },
+    })).toArray();
+
+    expect(bindings).toHaveLength(5);
+    expect(requests).toHaveLength(3);
+    for (let i = 1; i < requests.length; i++) {
+      expect(requests[i].time - requests[i - 1].time).toBeGreaterThanOrEqual(150);
+    }
+  });
+
+  it('respects restrictions provided as a VoRD description at a URL', async() => {
+    const endpoint = 'http://provided-description.example.org/sparql';
+    const requests: IEndpointRequest[] = [];
+    // The fetch function returns the service description with restrictions for every request without query.
+    const bindings = await (await engine.queryBindings(query, {
+      sources: [{ type: 'sparql', value: endpoint }],
+      fetch: createEndpointFetch(createServiceDescription(endpoint, vordRestrictions), 5, 2, requests),
+      endpointRestrictions: { [endpoint]: 'http://provided-description.example.org/vord.ttl' },
+    })).toArray();
+
+    expect(bindings).toHaveLength(5);
+    expect(requests).toHaveLength(3);
+  });
+
+  it('replaces the restrictions that the endpoint advertises', async() => {
+    const endpoint = 'http://provided-replaced.example.org/sparql';
+    const requests: IEndpointRequest[] = [];
+    const bindings = await (await engine.queryBindings(query, {
+      sources: [ endpoint ],
+      fetch: createEndpointFetch(createServiceDescription(endpoint, vordRestrictions), 5, 2, requests),
+      endpointRestrictions: { [endpoint]: []},
+    })).toArray();
+
+    // Without the advertised result size restriction, results are not requested in pages, and are truncated.
+    expect(bindings).toHaveLength(2);
+    expect(requests).toHaveLength(1);
+  });
+
+  it('rejects local files, as this engine cannot read them', async() => {
+    const endpoint = 'http://provided-file.example.org/sparql';
+    await expect(engine.queryBindings(query, {
+      sources: [{ type: 'sparql', value: endpoint }],
+      fetch: createEndpointFetch(createServiceDescription(endpoint, ''), 5, 2, []),
+      endpointRestrictions: { [endpoint]: 'vord.ttl' },
+    })).rejects.toThrow('can only be read by engines that can query local files, such as @comunica/query-sparql-file');
+  });
+
+  it('rejects invalid restrictions', async() => {
+    const endpoint = 'http://provided-invalid.example.org/sparql';
+    await expect(engine.queryBindings(query, {
+      sources: [{ type: 'sparql', value: endpoint }],
+      endpointRestrictions: { [endpoint]: [{ type: 'rate', maxValue: 1 }]},
+    })).rejects.toThrow(`Restriction 0 of ${endpoint} needs a windowDuration, such as 'PT1M'`);
+  });
+});

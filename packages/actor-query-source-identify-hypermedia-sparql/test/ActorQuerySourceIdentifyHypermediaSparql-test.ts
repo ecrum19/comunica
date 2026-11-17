@@ -1,5 +1,5 @@
 import { ActorQuerySourceIdentifyHypermedia } from '@comunica/bus-query-source-identify-hypermedia';
-import { KeysInitQuery } from '@comunica/context-entries';
+import { KeysCore, KeysInitQuery, KeysQuerySourceIdentify } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IActionContext } from '@comunica/types';
 import { DataFactory } from 'rdf-data-factory';
@@ -356,6 +356,66 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
         });
         expect((<any> output.source).resultLimit).toBeUndefined();
         expect((<any> output.source).restrictions).toEqual([{ type: 'resultSize', maxValue: 10 }]);
+      });
+
+      it('should replace advertised restrictions by the ones provided for the service URL', async() => {
+        const logger: any = { info: jest.fn() };
+        const output = await actor.run({
+          url: 'http://example.org/',
+          metadata: {
+            sparqlService: 'http://example.org/sparql',
+            restrictions: [{ type: 'resultSize', maxValue: 10 }],
+          },
+          quads: <any> null,
+          context: context
+            .set(KeysCore.log, logger)
+            .set(KeysQuerySourceIdentify.endpointRestrictionsResolved, {
+              'http://example.org/sparql': [{ type: 'resultSize', maxValue: 20 }],
+              'http://example.org/': [{ type: 'resultSize', maxValue: 30 }],
+            }),
+        });
+        expect((<any> output.source).resultLimit).toBe(20);
+        expect((<any> output.source).restrictions).toEqual([{ type: 'resultSize', maxValue: 20 }]);
+        expect(logger.info).toHaveBeenCalledWith(
+          'Using the restrictions provided for http://example.org/sparql instead of the advertised ones',
+          expect.objectContaining({ restrictions: [{ type: 'resultSize', maxValue: 20 }]}),
+        );
+      });
+
+      it('should use the restrictions provided for the original URL', async() => {
+        const output = await actor.run({
+          url: 'HTTP://example.org',
+          metadata: { sparqlService: 'http://example.org/sparql' },
+          quads: <any> null,
+          context: context.set(KeysQuerySourceIdentify.endpointRestrictionsResolved, {
+            'http://example.org/': [{ type: 'resultSize', maxValue: 30 }],
+          }),
+        });
+        expect((<any> output.source).url).toBe('http://example.org/sparql');
+        expect((<any> output.source).resultLimit).toBe(30);
+      });
+
+      it('should remove advertised restrictions if no restrictions are provided', async() => {
+        const output = await actor.run({
+          url: 'URL',
+          metadata: { sparqlService: 'SERVICE', restrictions: [{ type: 'resultSize', maxValue: 10 }]},
+          quads: <any> null,
+          context: context.set(KeysQuerySourceIdentify.endpointRestrictionsResolved, { SERVICE: []}),
+        });
+        expect((<any> output.source).resultLimit).toBeUndefined();
+        expect((<any> output.source).restrictions).toBeUndefined();
+      });
+
+      it('should keep advertised restrictions if restrictions are only provided for other endpoints', async() => {
+        const output = await actor.run({
+          url: 'URL',
+          metadata: { sparqlService: 'SERVICE', restrictions: [{ type: 'resultSize', maxValue: 10 }]},
+          quads: <any> null,
+          context: context.set(KeysQuerySourceIdentify.endpointRestrictionsResolved, {
+            'http://example.org/sparql': [{ type: 'resultSize', maxValue: 20 }],
+          }),
+        });
+        expect((<any> output.source).resultLimit).toBe(10);
       });
     });
   });

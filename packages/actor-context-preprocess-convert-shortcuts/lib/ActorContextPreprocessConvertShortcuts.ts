@@ -73,6 +73,7 @@ export interface IActorContextPreprocessConvertShortcutsArgs extends IActorConte
    *   "httpRetryBodyMaxBytes": "@comunica/bus-http:http-retry-body-max-bytes",
    *   "httpAbortSignal": "@comunica/bus-http:http-abort-controller",
    *   "httpCache": "@comunica/bus-http:httpCache",
+   *   "endpointRestrictions": "@comunica/bus-query-source-identify:endpointRestrictions",
    *   "fetch": "@comunica/bus-http:fetch",
    *   "recoverBrokenLinks": "@comunica/bus-http-wayback:recover-broken-links",
    *   "readOnly": "@comunica/bus-query-operation:readOnly",

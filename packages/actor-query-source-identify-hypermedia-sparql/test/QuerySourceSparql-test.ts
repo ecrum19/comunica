@@ -3377,6 +3377,98 @@ describe('QuerySourceSparql', () => {
       expect(mediator.mediate).toHaveBeenCalledTimes(2);
     });
 
+    describe('with many pages', () => {
+      const singleResultRestriction: IEndpointRestriction = { type: 'resultSize', maxValue: 1 };
+
+      /**
+       * Read all results from an endpoint with the given number of results, in pages of a single result.
+       * @param total The number of results.
+       * @return The number of results that were read, and the time it took in milliseconds.
+       */
+      async function readPagesOfOne(total: number): Promise<{ results: number; time: number }> {
+        source = createSource(createPagingMediator(total), { restrictions: [ singleResultRestriction ]});
+        const start = performance.now();
+        const results = await source.queryBindings(pattern, ctx).toArray();
+        return { results: results.length, time: performance.now() - start };
+      }
+
+      it('should read pages in linear time', async() => {
+        const few = await readPagesOfOne(1_000);
+        const many = await readPagesOfOne(5_000);
+        expect(few.results).toBe(1_000);
+        expect(many.results).toBe(5_000);
+        // Five times as many pages should take about five times as long,
+        // instead of 25 times if every page adds to the iterators that later results pass through.
+        expect(many.time / few.time).toBeLessThan(12);
+      }, 60_000);
+
+      it('should emit a single error if a late page fails', async() => {
+        const pagingMediator = createPagingMediator(5_000);
+        const error = new Error('late page error');
+        const mediator = {
+          mediate: jest.fn((action: any) => {
+            const query = new URLSearchParams(action.init.body.toString()).get('query')!;
+            return Number(/OFFSET (\d+)/u.exec(query)?.[1] ?? 0) >= 4_000 ?
+              Promise.reject(error) :
+              pagingMediator.mediate(action);
+          }),
+        };
+        source = createSource(mediator, { restrictions: [ singleResultRestriction ]});
+        const stream = source.queryBindings(pattern, ctx);
+        const onError = jest.fn();
+        stream.on('error', onError);
+        await expect(stream.toArray()).rejects.toThrow(error);
+        await new Promise(resolve => setImmediate(resolve));
+        expect(onError).toHaveBeenCalledTimes(1);
+        expect(onError).toHaveBeenCalledWith(error);
+        expect(mediator.mediate).toHaveBeenCalledTimes(4_001);
+      }, 60_000);
+    });
+
+    it('should emit an error if a later page cannot be parsed', async() => {
+      const pagingMediator = createPagingMediator(5);
+      const mediator = {
+        mediate: jest.fn()
+          .mockImplementationOnce((action: any) => pagingMediator.mediate(action))
+          .mockImplementationOnce(() => ({
+            headers: new Headers({ 'Content-Type': 'application/sparql-results+json' }),
+            body: Readable.from([ '{ "head": { "vars": [ "p" ]}, "results": { "bindings": [ invalid' ]),
+            ok: true,
+          })),
+      };
+      source = createSource(mediator, { restrictions: [ resultRestriction ]});
+      await expect(source.queryBindings(pattern, ctx).toArray()).rejects.toThrow('Unexpected');
+      expect(mediator.mediate).toHaveBeenCalledTimes(2);
+    });
+
+    it('should discard a page that arrives after the results are destroyed', async() => {
+      const pagingMediator = createPagingMediator(5);
+      let respond: () => void;
+      const mediator = { mediate: jest.fn() };
+      const requested = new Promise<void>((resolveRequested) => {
+        mediator.mediate.mockImplementation((action: any) => {
+          resolveRequested();
+          return new Promise((resolve) => {
+            respond = () => resolve(pagingMediator.mediate(action));
+          });
+        });
+      });
+      source = createSource(mediator, { restrictions: [ resultRestriction ]});
+      const queryBindingsRemote = jest.spyOn(source, 'queryBindingsRemote');
+      const stream = source.queryBindings(pattern, ctx);
+      const onData = jest.fn();
+      stream.on('data', onData);
+      await requested;
+
+      stream.destroy();
+      respond!();
+      const page = await queryBindingsRemote.mock.results[0].value;
+      await new Promise(resolve => setImmediate(resolve));
+      expect(page.done).toBeTruthy();
+      expect(onData).not.toHaveBeenCalled();
+      expect(mediator.mediate).toHaveBeenCalledTimes(1);
+    });
+
     it('should start the timeout of count requests once they are sent', async() => {
       jest.useFakeTimers();
       let rejectCount: (error: Error) => void;

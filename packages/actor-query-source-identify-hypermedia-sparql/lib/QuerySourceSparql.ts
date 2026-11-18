@@ -28,7 +28,7 @@ import {
 } from '@comunica/utils-query-operation';
 import type * as RDF from '@rdfjs/types';
 import type { AsyncIterator } from 'asynciterator';
-import { ArrayIterator, TransformIterator, wrap } from 'asynciterator';
+import { BufferedIterator, TransformIterator, wrap } from 'asynciterator';
 import type { ISparqlEndpointFetcherRequestOptions } from 'fetch-sparql-endpoint';
 import { SparqlEndpointFetcher } from 'fetch-sparql-endpoint';
 import { LRUCache } from 'lru-cache';
@@ -320,7 +320,7 @@ export class QuerySourceSparql implements IQuerySource {
 
       // Request results in pages if the endpoint would otherwise truncate them.
       if (this.resultLimit !== undefined && !QuerySourceSparql.isLimitedTo(operation, this.resultLimit)) {
-        return this.queryBindingsPaged(operation, variables, context, undefVariables, this.resultLimit, 0);
+        return this.queryBindingsPaged(operation, variables, context, undefVariables, this.resultLimit);
       }
 
       // Join bindings modify the operation, so it is no longer equivalent to the original query string.
@@ -346,39 +346,22 @@ export class QuerySourceSparql implements IQuerySource {
    * @param context The context of the operation.
    * @param undefVariables Variables that may have undefs.
    * @param pageSize The number of results per page.
-   * @param offset The offset of the page to request.
    */
-  protected async queryBindingsPaged(
+  protected queryBindingsPaged(
     operation: Algebra.Operation,
     variables: RDF.Variable[],
     context: IActionContext,
     undefVariables: RDF.Variable[],
     pageSize: number,
-    offset: number,
-  ): Promise<BindingsStream> {
-    const pageQuery = await this.operationToQuery(this.algebraFactory.createSlice(
-      isKnownOperation(operation, Algebra.Types.PROJECT) ?
-        operation :
-        this.algebraFactory.createProject(operation, variables),
-      offset,
-      pageSize,
-    ));
-    this.reportSourceQuery(context, pageQuery);
-    const page = await this.queryBindingsRemote(this.url, pageQuery, variables, context, undefVariables);
-
-    let pageResults = 0;
-    const nextPages = new TransformIterator<RDF.Bindings>(async() => pageResults === pageSize ?
-      this.queryBindingsPaged(operation, variables, context, undefVariables, pageSize, offset + pageSize) :
-      new ArrayIterator<RDF.Bindings>([], { autoStart: false }), { autoStart: false });
-    const results = page
-      .map((bindings) => {
-        pageResults++;
-        return bindings;
-      })
-      .append(nextPages);
-    // Appended iterators do not forward their errors, such as failed requests for later pages.
-    nextPages.on('error', error => results.destroy(error));
-    return results;
+  ): BindingsStream {
+    const projection = isKnownOperation(operation, Algebra.Types.PROJECT) ?
+      operation :
+      this.algebraFactory.createProject(operation, variables);
+    return new PagedBindingsIterator(pageSize, async(offset) => {
+      const pageQuery = await this.operationToQuery(this.algebraFactory.createSlice(projection, offset, pageSize));
+      this.reportSourceQuery(context, pageQuery);
+      return this.queryBindingsRemote(this.url, pageQuery, variables, context, undefVariables);
+    });
   }
 
   /**
@@ -829,5 +812,93 @@ export class QuerySourceSparql implements IQuerySource {
 
   public toString(): string {
     return `QuerySourceSparql(${this.url})`;
+  }
+}
+
+/**
+ * An iterator over results that are requested in pages of a fixed size, one page after the other,
+ * until a page contains fewer results than the page size.
+ * All pages are read through this one iterator, so that the number of iterators
+ * that each result passes through does not grow with the number of pages.
+ */
+class PagedBindingsIterator extends BufferedIterator<RDF.Bindings> {
+  private readonly pageSize: number;
+  private readonly requestPage: (offset: number) => Promise<BindingsStream>;
+  private page: BindingsStream | undefined;
+  private pageResults = 0;
+  private offset = 0;
+
+  /**
+   * @param pageSize The number of results per page.
+   * @param requestPage A function that requests the page of results at the given offset.
+   */
+  public constructor(pageSize: number, requestPage: (offset: number) => Promise<BindingsStream>) {
+    super({ autoStart: false });
+    this.pageSize = pageSize;
+    this.requestPage = requestPage;
+  }
+
+  protected override _read(count: number, done: () => void): void {
+    if (!this.page) {
+      this.startPage(count, done);
+      return;
+    }
+
+    while (count > 0) {
+      const item = this.page.read();
+      if (item === null) {
+        break;
+      }
+      this.pageResults++;
+      this._push(item);
+      count--;
+    }
+
+    if (this.page.done) {
+      // Only a full page can be followed by more results.
+      if (this.pageResults === this.pageSize) {
+        this.offset += this.pageSize;
+        this.page = undefined;
+        this.pageResults = 0;
+        this.startPage(count, done);
+        return;
+      }
+      this.close();
+    }
+    done();
+  }
+
+  /**
+   * Request the page at the current offset, and read from it once it is available.
+   * @param count The number of results to read.
+   * @param done To be called when reading is complete.
+   */
+  protected startPage(count: number, done: () => void): void {
+    this.requestPage(this.offset).then((page) => {
+      // Discard the page if this iterator was closed or destroyed in the meantime.
+      if (this.closed) {
+        page.destroy();
+        return done();
+      }
+      this.page = page;
+      // The buffer is refilled when this iterator is read after becoming readable,
+      // which also lets the next page be requested once this page ends.
+      page.on('readable', () => {
+        this.readable = true;
+      });
+      page.on('end', () => {
+        this.readable = true;
+      });
+      page.on('error', (error: Error) => this.destroy(error));
+      this._read(count, done);
+    }, (error: Error) => {
+      this.destroy(error);
+      done();
+    });
+  }
+
+  protected override _end(destroy?: boolean): void {
+    super._end(destroy);
+    this.page?.destroy();
   }
 }

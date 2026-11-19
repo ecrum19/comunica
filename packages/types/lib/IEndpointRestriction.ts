@@ -133,3 +133,15 @@ export interface IEndpointRestrictionInput {
  * like a SPARQL service description, or a list of restrictions.
  */
 export type EndpointRestrictionsInput = Record<string, string | IEndpointRestrictionInput[]>;
+
+/**
+ * How the restrictions that users provide for an endpoint relate to the restrictions that it advertises:
+ * - `replace`: the provided restrictions replace the advertised ones.
+ *   The service description is fetched as for any endpoint.
+ * - `compare`: as `replace`, and the advertised restrictions are compared with the provided ones,
+ *   reporting whether they match, partially match, or do not match.
+ *   The service description is always fetched, also for a single source of type `sparql`.
+ * - `provided-only`: only the provided restrictions are used,
+ *   and the service description is not fetched for endpoints with provided restrictions.
+ */
+export type EndpointRestrictionsMode = 'replace' | 'compare' | 'provided-only';

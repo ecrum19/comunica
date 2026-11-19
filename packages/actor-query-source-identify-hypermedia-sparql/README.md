@@ -59,6 +59,8 @@ After installing, this package can be added to your engine's configuration as fo
 Endpoints can advertise restrictions, such as rate limits and maximum result sizes, in their service description using the [VoRD vocabulary](https://w3id.org/vord#), which [`@comunica/actor-rdf-metadata-extract-vord`](https://github.com/comunica/comunica/tree/master/packages/actor-rdf-metadata-extract-vord) extracts.
 Users can also provide restrictions for endpoints in the `endpointRestrictions` context entry (see [`@comunica/actor-context-preprocess-endpoint-restrictions`](https://github.com/comunica/comunica/tree/master/packages/actor-context-preprocess-endpoint-restrictions)).
 Provided restrictions replace the advertised ones of the same endpoint.
+If the `endpointRestrictionsMode` context entry is `compare`, this actor also compares them with the advertised ones,
+and logs whether they match (as info), partially match or do not match (as warnings); `compareEndpointRestrictions` does the comparison.
 This actor passes the restrictions of an endpoint to its requests, so that [`@comunica/actor-http-limit-restrictions`](https://github.com/comunica/comunica/tree/master/packages/actor-http-limit-restrictions) can respect them.
 
 ## Endpoint Server Header Report

@@ -4,6 +4,15 @@
 
 A [Query Source Dereference Link](https://github.com/comunica/comunica/tree/master/packages/bus-query-source-dereference-link) actor that avoids metadata fetching of forced SPARQL endpoints.
 
+It handles:
+* a single source of type `sparql`, whose service description is not needed;
+* SPARQL endpoints whose restrictions users provide in the `endpointRestrictions` context entry,
+  if `endpointRestrictionsMode` is `provided-only`, whatever the number of sources
+  (see [`@comunica/actor-context-preprocess-endpoint-restrictions`](https://github.com/comunica/comunica/tree/master/packages/actor-context-preprocess-endpoint-restrictions)).
+
+If `endpointRestrictionsMode` is `compare`, it does not handle endpoints with provided restrictions,
+so that their service description is fetched and their advertised restrictions can be compared with the provided ones.
+
 This module is part of the [Comunica framework](https://github.com/comunica/comunica),
 and should only be used by [developers that want to build their own query engine](https://comunica.dev/docs/modify/).
 
@@ -40,4 +49,4 @@ After installing, this package can be added to your engine's configuration as fo
 
 * `mediatorMetadataAccumulate`: A mediator over the [Metadata Accumulatebus](https://github.com/comunica/comunica/tree/master/packages/bus-metadata-accumulate).
 * `mediatorQuerySourceIdentifyHypermedia`: A mediator over the [Query Source Identify Hypermedia bus](https://github.com/comunica/comunica/tree/master/packages/bus-query-source-identify-hypermedia).
-* `fetchServiceDescription`: If the service description of a single forced SPARQL source should still be fetched, e.g. to discover the restrictions of the endpoint. If enabled, this actor does not handle any sources, so that other actors fetch the service description. Defaults to `false`.
+* `fetchServiceDescription`: If the service description of a single forced SPARQL source should still be fetched, e.g. to discover the restrictions of the endpoint. If enabled, this actor only handles endpoints with provided restrictions in the `provided-only` mode, so that other actors fetch the service description. Defaults to `false`.

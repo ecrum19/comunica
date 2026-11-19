@@ -23,6 +23,9 @@ const VORD = 'https://w3id.org/vord#';
 const TYPES = new Set<string>([ ...Object.values(ActorRdfMetadataExtractVord.RESTRICTION_TYPES), 'other' ]);
 const ENFORCEMENTS = new Set<string>([ ...Object.values(ActorRdfMetadataExtractVord.ENFORCEMENTS), 'other' ]);
 
+// The values of the endpointRestrictionsMode context entry.
+const MODES = new Set<string>([ 'replace', 'compare', 'provided-only' ]);
+
 // The fields of restriction objects.
 const FIELDS = [
   'type',
@@ -47,6 +50,7 @@ const FIELDS = [
  * It reads the restrictions that users provide for endpoints in the endpointRestrictions context entry,
  * either from RDF documents that describe them with VoRD, or from restriction objects,
  * and stores them in KeysQuerySourceIdentify.endpointRestrictionsResolved for SPARQL sources to use.
+ * It also checks the endpointRestrictionsMode context entry.
  */
 export class ActorContextPreprocessEndpointRestrictions extends ActorContextPreprocess {
   public readonly mediatorDereferenceRdf: MediatorDereferenceRdf;
@@ -62,8 +66,16 @@ export class ActorContextPreprocessEndpointRestrictions extends ActorContextPrep
 
   public async run(action: IActionContextPreprocess): Promise<IActorContextPreprocessOutput> {
     let context = action.context;
+    if (!action.initialize) {
+      return { context };
+    }
+    const mode: unknown = context.get(KeysQuerySourceIdentify.endpointRestrictionsMode);
+    if (mode !== undefined && (typeof mode !== 'string' || !MODES.has(mode))) {
+      const modes = [ ...MODES ].join(', ');
+      throw new TypeError(`The endpointRestrictionsMode context entry must be one of ${modes}, but was ${JSON.stringify(mode)}`);
+    }
     const input: unknown = context.get(KeysQuerySourceIdentify.endpointRestrictions);
-    if (!action.initialize || input === undefined) {
+    if (input === undefined) {
       return { context };
     }
     if (typeof input !== 'object' || input === null || Array.isArray(input)) {

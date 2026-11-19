@@ -1,10 +1,26 @@
 import { join } from 'node:path';
+import { LoggerVoid } from '@comunica/logger-void';
 import { QueryEngine } from '../lib/QueryEngine';
 import { QueryEngineFactory } from '../lib/QueryEngineFactory';
 
 interface IEndpointRequest {
   query: string;
   time: number;
+}
+
+/**
+ * A logger that keeps the info and warning messages.
+ */
+class CapturingLogger extends LoggerVoid {
+  public readonly messages: { level: string; message: string }[] = [];
+
+  public override info(...args: any[]): void {
+    this.messages.push({ level: 'info', message: args[0] });
+  }
+
+  public override warn(...args: any[]): void {
+    this.messages.push({ level: 'warn', message: args[0] });
+  }
 }
 
 /**
@@ -15,18 +31,22 @@ interface IEndpointRequest {
  * @param total The number of results.
  * @param truncateAt The maximum number of results per response.
  * @param requests An array in which the received queries are stored.
+ * @param descriptionRequests An array in which the URLs of requests for the service description are stored.
  */
 function createEndpointFetch(
   serviceDescription: string,
   total: number,
   truncateAt: number,
   requests: IEndpointRequest[],
+  descriptionRequests: string[] = [],
 ): typeof fetch {
   return async(input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
     const query = init?.body ?
       new URLSearchParams(String(init.body)).get('query') :
-      new URL(input instanceof Request ? input.url : String(input)).searchParams.get('query');
+      new URL(url).searchParams.get('query');
     if (!query) {
+      descriptionRequests.push(url);
       return new Response(serviceDescription, { status: 200, headers: { 'Content-Type': 'text/turtle' }});
     }
     requests.push({ query, time: Date.now() });
@@ -225,5 +245,118 @@ describe('System test: QuerySparql with endpoint restrictions provided by the us
       sources: [{ type: 'sparql', value: endpoint }],
       endpointRestrictions: { [endpoint]: [{ type: 'rate', maxValue: 1 }]},
     })).rejects.toThrow(`Restriction 0 of ${endpoint} needs a windowDuration, such as 'PT1M'`);
+  });
+});
+
+describe('System test: QuerySparql with endpoint restrictions provided by the user, in other modes', () => {
+  const query = 'SELECT ?o WHERE { <http://example.org/s> <http://example.org/p> ?o }';
+  const advertisedEquivalent = [
+    {
+      type: 'resultSize',
+      metric: 'vord:resultBindings',
+      maxValue: 2,
+      enforcement: 'truncate',
+      hardRestriction: true,
+    },
+    {
+      type: 'rate',
+      metric: 'vord:requestsPerWindow',
+      maxValue: 1,
+      windowDuration: 'PT0.2S',
+      enforcement: 'reject',
+    },
+  ];
+  let engine: QueryEngine;
+
+  beforeAll(() => {
+    engine = new QueryEngine();
+  });
+
+  it('does not fetch the service description in the provided-only mode', async() => {
+    const endpoint = 'http://provided-only.example.org/sparql';
+    const requests: IEndpointRequest[] = [];
+    const descriptionRequests: string[] = [];
+    const bindings = await (await engine.queryBindings(query, {
+      sources: [ endpoint ],
+      fetch: createEndpointFetch(createServiceDescription(endpoint, ''), 5, 2, requests, descriptionRequests),
+      endpointRestrictions: { [endpoint]: [{ type: 'resultSize', maxValue: 2, enforcement: 'truncate' }]},
+      endpointRestrictionsMode: 'provided-only',
+    })).toArray();
+
+    expect(bindings).toHaveLength(5);
+    expect(requests).toHaveLength(3);
+    expect(descriptionRequests).toEqual([]);
+  });
+
+  it('only skips the service descriptions of endpoints with provided restrictions in provided-only mode', async() => {
+    const provided = 'http://provided-only-a.example.org/sparql';
+    const other = 'http://provided-only-b.example.org/sparql';
+    const descriptionRequests: string[] = [];
+    const bindings = await (await engine.queryBindings(query, {
+      sources: [ provided, other ],
+      fetch: createEndpointFetch(createServiceDescription(other, ''), 5, 5, [], descriptionRequests),
+      endpointRestrictions: { [provided]: []},
+      endpointRestrictionsMode: 'provided-only',
+    })).toArray();
+
+    expect(bindings).toHaveLength(10);
+    expect(descriptionRequests).toEqual([ other ]);
+  });
+
+  it('reports that provided restrictions match the advertised ones in the compare mode', async() => {
+    const endpoint = 'http://compare-match.example.org/sparql';
+    const requests: IEndpointRequest[] = [];
+    const descriptionRequests: string[] = [];
+    const logger = new CapturingLogger();
+    const bindings = await (await engine.queryBindings(query, {
+      // The service description of a single forced SPARQL source is fetched in the compare mode.
+      sources: [{ type: 'sparql', value: endpoint }],
+      fetch: createEndpointFetch(
+        createServiceDescription(endpoint, vordRestrictions),
+        5,
+        2,
+        requests,
+        descriptionRequests,
+      ),
+      endpointRestrictions: { [endpoint]: advertisedEquivalent },
+      endpointRestrictionsMode: 'compare',
+      log: logger,
+    })).toArray();
+
+    expect(bindings).toHaveLength(5);
+    expect(descriptionRequests).toEqual([ endpoint ]);
+    expect(logger.messages).toContainEqual({
+      level: 'info',
+      message: `The restrictions provided for ${endpoint} match the ones it advertises (2 restrictions)`,
+    });
+  });
+
+  it('warns that provided restrictions do not match the advertised ones in compare mode, and uses them', async() => {
+    const endpoint = 'http://compare-mismatch.example.org/sparql';
+    const requests: IEndpointRequest[] = [];
+    const logger = new CapturingLogger();
+    const bindings = await (await engine.queryBindings(query, {
+      sources: [ endpoint ],
+      fetch: createEndpointFetch(createServiceDescription(endpoint, vordRestrictions), 5, 2, requests),
+      endpointRestrictions: { [endpoint]: [{ type: 'rate', maxValue: 10, windowDuration: 'PT1S' }]},
+      endpointRestrictionsMode: 'compare',
+      log: logger,
+    })).toArray();
+
+    // The provided restrictions are used: without a result size restriction, results are truncated.
+    expect(bindings).toHaveLength(2);
+    expect(logger.messages).toContainEqual({
+      level: 'warn',
+      message: `The restrictions provided for ${endpoint} do not match the ones it advertises: rate differs in maxValue (provided 10, advertised 1), windowDuration (provided 1000, advertised 200); not provided: resultSize`,
+    });
+  });
+
+  it('rejects an unknown mode', async() => {
+    await expect(engine.queryBindings(query, {
+      sources: [ 'http://mode.example.org/sparql' ],
+      endpointRestrictionsMode: <any> 'merge',
+    })).rejects.toThrow(
+      'The endpointRestrictionsMode context entry must be one of replace, compare, provided-only, but was "merge"',
+    );
   });
 });

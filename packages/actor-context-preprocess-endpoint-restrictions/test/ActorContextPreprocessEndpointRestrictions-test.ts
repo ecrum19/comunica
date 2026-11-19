@@ -102,6 +102,25 @@ describe('ActorContextPreprocessEndpointRestrictions', () => {
       await expect(actor.run({ context: contextIn })).resolves.toEqual({ context: contextIn });
     });
 
+    it.each([ 'replace', 'compare', 'provided-only' ])('should accept the mode %s', async(mode) => {
+      const contextIn = context.set(KeysQuerySourceIdentify.endpointRestrictionsMode, <any> mode);
+      await expect(actor.run({ context: contextIn, initialize: true })).resolves.toEqual({ context: contextIn });
+    });
+
+    it.each([
+      [ 'an unknown mode', 'merge', '"merge"' ],
+      [ 'not a string', true, 'true' ],
+    ])('should reject a mode that is %s', async(_name, mode, shown) => {
+      const contextIn = context.set(KeysQuerySourceIdentify.endpointRestrictionsMode, <any> mode);
+      await expect(actor.run({ context: contextIn, initialize: true })).rejects
+        .toThrow(`The endpointRestrictionsMode context entry must be one of replace, compare, provided-only, but was ${shown}`);
+    });
+
+    it('should not check the mode in a context that is not being initialized', async() => {
+      const contextIn = context.set(KeysQuerySourceIdentify.endpointRestrictionsMode, <any> 'merge');
+      await expect(actor.run({ context: contextIn })).resolves.toEqual({ context: contextIn });
+    });
+
     it.each([
       [ 'an array', []],
       [ 'a string', 'restrictions.ttl' ],

@@ -74,6 +74,7 @@ export interface IActorContextPreprocessConvertShortcutsArgs extends IActorConte
    *   "httpAbortSignal": "@comunica/bus-http:http-abort-controller",
    *   "httpCache": "@comunica/bus-http:httpCache",
    *   "endpointRestrictions": "@comunica/bus-query-source-identify:endpointRestrictions",
+   *   "endpointRestrictionsMode": "@comunica/bus-query-source-identify:endpointRestrictionsMode",
    *   "fetch": "@comunica/bus-http:fetch",
    *   "recoverBrokenLinks": "@comunica/bus-http-wayback:recover-broken-links",
    *   "readOnly": "@comunica/bus-query-operation:readOnly",

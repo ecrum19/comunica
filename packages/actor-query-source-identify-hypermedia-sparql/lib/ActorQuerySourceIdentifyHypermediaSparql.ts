@@ -16,6 +16,7 @@ import { failTest, passTest } from '@comunica/core';
 import type { ComunicaDataFactory, IActionContext, IEndpointRestriction } from '@comunica/types';
 import { AlgebraFactory } from '@comunica/utils-algebra';
 import { BindingsFactory } from '@comunica/utils-bindings-factory';
+import { compareEndpointRestrictions, describeEndpointRestrictionComparison } from './EndpointRestrictionComparison';
 import { QuerySourceSparql } from './QuerySourceSparql';
 
 /**
@@ -95,6 +96,9 @@ export class ActorQuerySourceIdentifyHypermediaSparql extends ActorQuerySourceId
     const providedRestrictions = ActorQuerySourceIdentifyHypermediaSparql
       .getProvidedRestrictions(action.context, [ url, action.url ]);
     if (providedRestrictions) {
+      if (action.context.get(KeysQuerySourceIdentify.endpointRestrictionsMode) === 'compare') {
+        this.logRestrictionComparison(action.context, url, providedRestrictions, action.metadata);
+      }
       this.logInfo(action.context, `Using the restrictions provided for ${url} instead of the advertised ones`, () => ({
         restrictions: providedRestrictions,
       }));
@@ -124,6 +128,34 @@ export class ActorQuerySourceIdentifyHypermediaSparql extends ActorQuerySourceId
       this.restrictionAwarePlanning,
     );
     return { source };
+  }
+
+  /**
+   * Compare the restrictions that users provided for an endpoint with the ones it advertises,
+   * and log whether they match (as info), or partially match or do not match (as warnings).
+   * @param context The context.
+   * @param url The URL of the endpoint.
+   * @param providedRestrictions The provided restrictions.
+   * @param metadata The metadata of the endpoint's service description, with the advertised restrictions.
+   */
+  public logRestrictionComparison(
+    context: IActionContext,
+    url: string,
+    providedRestrictions: IEndpointRestriction[],
+    metadata: Record<string, any>,
+  ): void {
+    // The request time is only known if the service description was read.
+    if (!('requestTime' in metadata)) {
+      this.logWarn(context, `The restrictions provided for ${url} could not be compared with the ones it advertises, because its service description could not be read`);
+      return;
+    }
+    const comparison = compareEndpointRestrictions(providedRestrictions, metadata.restrictions ?? []);
+    const message = describeEndpointRestrictionComparison(url, comparison);
+    if (comparison.result === 'match') {
+      this.logInfo(context, message, () => ({ comparison }));
+    } else {
+      this.logWarn(context, message, () => ({ comparison }));
+    }
   }
 
   /**

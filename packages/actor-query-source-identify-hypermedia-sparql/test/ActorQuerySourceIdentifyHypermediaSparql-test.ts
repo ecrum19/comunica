@@ -1,7 +1,7 @@
 import { ActorQuerySourceIdentifyHypermedia } from '@comunica/bus-query-source-identify-hypermedia';
 import { KeysCore, KeysInitQuery, KeysQuerySourceIdentify } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
-import type { IActionContext } from '@comunica/types';
+import type { IActionContext, IEndpointRestriction } from '@comunica/types';
 import { DataFactory } from 'rdf-data-factory';
 import { ActorQuerySourceIdentifyHypermediaSparql } from '../lib/ActorQuerySourceIdentifyHypermediaSparql';
 import { QuerySourceSparql } from '../lib/QuerySourceSparql';
@@ -416,6 +416,87 @@ describe('ActorQuerySourceIdentifyHypermediaSparql', () => {
           }),
         });
         expect((<any> output.source).resultLimit).toBe(10);
+      });
+
+      describe('in the compare mode', () => {
+        const provided: IEndpointRestriction[] = [{ type: 'resultSize', maxValue: 20 }];
+        let logger: any;
+        let compareContext: IActionContext;
+
+        beforeEach(() => {
+          logger = { info: jest.fn(), warn: jest.fn() };
+          compareContext = context
+            .set(KeysCore.log, logger)
+            .set(KeysQuerySourceIdentify.endpointRestrictionsMode, 'compare')
+            .set(KeysQuerySourceIdentify.endpointRestrictionsResolved, { SERVICE: provided });
+        });
+
+        it('should report provided restrictions that match the advertised ones, and use them', async() => {
+          const output = await actor.run({
+            url: 'URL',
+            metadata: { sparqlService: 'SERVICE', requestTime: 1, restrictions: [{ type: 'resultSize', maxValue: 20 }]},
+            quads: <any> null,
+            context: compareContext,
+          });
+          expect((<any> output.source).resultLimit).toBe(20);
+          expect(logger.info).toHaveBeenCalledWith(
+            'The restrictions provided for SERVICE match the ones it advertises (1 restriction)',
+            expect.objectContaining({ comparison: expect.objectContaining({ result: 'match' }) }),
+          );
+          expect(logger.warn).not.toHaveBeenCalled();
+        });
+
+        it('should warn about provided restrictions that do not match the advertised ones, and use them', async() => {
+          const output = await actor.run({
+            url: 'URL',
+            metadata: { sparqlService: 'SERVICE', requestTime: 1, restrictions: [{ type: 'resultSize', maxValue: 10 }]},
+            quads: <any> null,
+            context: compareContext,
+          });
+          expect((<any> output.source).resultLimit).toBe(20);
+          expect(logger.warn).toHaveBeenCalledWith(
+            'The restrictions provided for SERVICE do not match the ones it advertises: ' +
+            'resultSize differs in maxValue (provided 20, advertised 10)',
+            expect.objectContaining({ comparison: expect.objectContaining({ result: 'mismatch' }) }),
+          );
+        });
+
+        it('should warn if the endpoint advertises no restrictions', async() => {
+          await actor.run({
+            url: 'URL',
+            metadata: { sparqlService: 'SERVICE', requestTime: 1 },
+            quads: <any> null,
+            context: compareContext,
+          });
+          expect(logger.warn).toHaveBeenCalledWith(
+            'The restrictions provided for SERVICE do not match the ones it advertises: it advertises no restrictions',
+            expect.anything(),
+          );
+        });
+
+        it('should warn if the service description could not be read', async() => {
+          await actor.run({
+            url: 'URL',
+            metadata: { sparqlService: 'SERVICE' },
+            quads: <any> null,
+            context: compareContext,
+          });
+          expect(logger.warn).toHaveBeenCalledWith(
+            'The restrictions provided for SERVICE could not be compared with the ones it advertises, ' +
+            'because its service description could not be read',
+            expect.anything(),
+          );
+        });
+
+        it('should not compare in the replace mode', async() => {
+          await actor.run({
+            url: 'URL',
+            metadata: { sparqlService: 'SERVICE', requestTime: 1, restrictions: [{ type: 'resultSize', maxValue: 10 }]},
+            quads: <any> null,
+            context: compareContext.set(KeysQuerySourceIdentify.endpointRestrictionsMode, 'replace'),
+          });
+          expect(logger.warn).not.toHaveBeenCalled();
+        });
       });
     });
   });

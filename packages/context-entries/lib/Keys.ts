@@ -21,6 +21,7 @@ import type {
   IStatisticBase,
   IDiscoverEventData,
   EndpointRestrictionsInput,
+  EndpointRestrictionsMode,
   IEndpointRestriction,
   IServiceExecutor,
   ServiceExecutorCreator,
@@ -512,6 +513,13 @@ export const KeysQuerySourceIdentify = {
    */
   endpointRestrictions: new ActionContextKey<EndpointRestrictionsInput>(
     '@comunica/bus-query-source-identify:endpointRestrictions',
+  ),
+  /**
+   * How the restrictions provided via endpointRestrictions relate to the ones that endpoints advertise:
+   * `replace` (the default), `compare` or `provided-only`.
+   */
+  endpointRestrictionsMode: new ActionContextKey<EndpointRestrictionsMode>(
+    '@comunica/bus-query-source-identify:endpointRestrictionsMode',
   ),
   /**
    * The restrictions of endpoints that users provided via endpointRestrictions, keyed by normalized endpoint URL,

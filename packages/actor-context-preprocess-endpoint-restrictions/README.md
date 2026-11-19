@@ -67,6 +67,55 @@ An empty list (`[]`) makes Comunica ignore the advertised restrictions.
 Restrictions are tracked per host by `@comunica/actor-http-limit-restrictions`,
 so endpoints on the same host should be given the same restrictions.
 
+### Modes
+
+The `endpointRestrictionsMode` context entry determines what happens with the restrictions that an endpoint advertises
+when restrictions are provided for it. It applies to all endpoints in `endpointRestrictions`:
+
+| Mode | Service description | Restrictions used | Comparison |
+|---|---|---|---|
+| `replace` (default) | Fetched as for any source | The provided ones | No |
+| `compare` | Always fetched, also for a single source of type `sparql` (whose service description is otherwise not fetched) | The provided ones | Yes: Comunica logs whether the provided restrictions match, partially match, or do not match the advertised ones |
+| `provided-only` | Not fetched | The provided ones | No |
+
+```javascript
+const bindingsStream = await engine.queryBindings(`SELECT * WHERE { ?s ?p ?o } LIMIT 100`, {
+  sources: [ 'https://query.wikidata.org/sparql' ],
+  endpointRestrictions: {
+    'https://query.wikidata.org/sparql': [ { type: 'rate', maxValue: 60, windowDuration: 'PT1M' } ],
+  },
+  endpointRestrictionsMode: 'compare',
+});
+```
+
+```bash
+comunica-sparql https://query.wikidata.org/sparql -l info \
+  -q 'SELECT * WHERE { ?s ?p ?o } LIMIT 100' \
+  -c '{ "endpointRestrictions": { "https://query.wikidata.org/sparql": [ { "type": "rate", "maxValue": 60, "windowDuration": "PT1M" } ] }, "endpointRestrictionsMode": "compare" }'
+```
+
+**`compare`** pairs every provided restriction with an advertised restriction of the same type.
+Two restrictions agree if every field that both of them specify has the same value
+(a field that only one of them specifies does not count as a difference, and restrictions are strictly enforced unless `hardRestriction` is `false`).
+The result is logged once per endpoint and query:
+* **match** (logged as info, so shown with `-l info`): every provided restriction agrees with an advertised one, and vice versa.
+  For example: `The restrictions provided for https://query.wikidata.org/sparql match the ones it advertises (1 restriction)`.
+* **partial match** (logged as a warning): some restrictions agree.
+  The message lists the fields that differ, the provided restrictions that are not advertised, and the advertised ones that are not provided.
+  For example: `The restrictions provided for … partially match the ones it advertises: 1 of 2 match; resultSize differs in maxValue (provided 1000, advertised 10000)`.
+* **no match** (logged as a warning): no restriction agrees, or the endpoint advertises no restrictions.
+  For example: `The restrictions provided for … do not match the ones it advertises: it advertises no restrictions`.
+
+If the service description cannot be read, a warning says that the restrictions could not be compared.
+The full comparison is attached to the log entry as `comparison`, for loggers that keep structured data.
+
+**`provided-only`** treats every source whose URL has provided restrictions as a SPARQL endpoint, and queries it at that URL
+without requesting its service description, also within a federation of several sources.
+So any other information in the service description, such as VoID statistics or a different `sd:endpoint`, is not used either.
+This only works if the restrictions are provided for the URL by which the endpoint is queried:
+if they are provided for its `sd:endpoint` instead, the service description is fetched to find that URL,
+and only the provided restrictions are used.
+
 ### Restriction objects
 
 Each object describes one restriction.
@@ -201,4 +250,5 @@ which converts the `endpointRestrictions` shortcut into the full context key.
 ### Context entries
 
 * `KeysQuerySourceIdentify.endpointRestrictions` (`endpointRestrictions`): the restrictions that users provide, as described above. This entry is removed once it has been read.
+* `KeysQuerySourceIdentify.endpointRestrictionsMode` (`endpointRestrictionsMode`): `replace` (default), `compare` or `provided-only`, as described above. This actor checks its value; `@comunica/actor-query-source-dereference-link-force-sparql` and `@comunica/actor-query-source-identify-hypermedia-sparql` act on it.
 * `KeysQuerySourceIdentify.endpointRestrictionsResolved`: set by this actor, with the restrictions (as `IEndpointRestriction` objects from `@comunica/types`) keyed by normalized endpoint URL. `@comunica/actor-query-source-identify-hypermedia-sparql` uses them instead of the advertised restrictions.

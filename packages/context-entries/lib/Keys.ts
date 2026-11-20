@@ -22,6 +22,7 @@ import type {
   IDiscoverEventData,
   EndpointRestrictionsInput,
   EndpointRestrictionsMode,
+  IClientContact,
   IEndpointRestriction,
   IServiceExecutor,
   ServiceExecutorCreator,
@@ -126,6 +127,11 @@ export const KeysHttp = {
    * This is set by query sources for their own requests, and is not meant to be set by users.
    */
   endpointRestrictions: new ActionContextKey<IEndpointRestriction[]>('@comunica/bus-http:endpoint-restrictions'),
+  /**
+   * Contact information with which the engine identifies itself to endpoints that require identification,
+   * as advertised with VoRD identification restrictions. It is only sent to endpoints that require it.
+   */
+  clientContact: new ActionContextKey<IClientContact>('@comunica/bus-http:client-contact'),
 };
 
 export const KeysHttpWayback = {

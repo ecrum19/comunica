@@ -17,6 +17,10 @@ const COMPARED_FIELDS: (keyof IEndpointRestriction)[] = [
   'enforcement',
   'hardRestriction',
   'costModel',
+  'penaltyThreshold',
+  'penaltyDuration',
+  'identificationHeader',
+  'identificationFormat',
 ];
 
 /**

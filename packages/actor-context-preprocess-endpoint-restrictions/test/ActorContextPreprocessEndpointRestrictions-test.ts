@@ -306,6 +306,48 @@ describe('ActorContextPreprocessEndpointRestrictions', () => {
         .toEqual({ type: 'quota', metric: `${VORD}requestsPerDay`, maxValue: 1_000, windowDuration: 86_400_000 });
     });
 
+    it('should parse identification restrictions', async() => {
+      await expect(resolveRestriction({
+        type: 'vord:IdentificationRestriction',
+        identificationHeader: 'From',
+        identificationFormat: 'vord:EmailAddress',
+        returnsStatusCode: 403,
+      })).resolves.toEqual({
+        type: 'identification',
+        identificationHeader: 'from',
+        identificationFormat: 'email',
+        returnsStatusCode: 403,
+      });
+      await expect(resolveRestriction({
+        type: 'identification',
+        identificationHeader: 'User-Agent',
+        identificationFormat: 'productWithContact',
+      })).resolves.toEqual({
+        type: 'identification',
+        identificationHeader: 'user-agent',
+        identificationFormat: 'productWithContact',
+      });
+    });
+
+    it('should parse usage budgets with penalties', async() => {
+      await expect(resolveRestriction({
+        metric: 'vord:costUnitsPerWindow',
+        maxValue: 600,
+        burstValue: 200,
+        windowDuration: 'PT1M',
+        penaltyThreshold: 1,
+        penaltyDuration: 'PT10M',
+      })).resolves.toEqual({
+        type: 'costModel',
+        metric: `${VORD}costUnitsPerWindow`,
+        maxValue: 600,
+        burstValue: 200,
+        windowDuration: 60_000,
+        penaltyThreshold: 1,
+        penaltyDuration: 600_000,
+      });
+    });
+
     it('should accept restrictions without a limit if Comunica does not act on them', async() => {
       await expect(resolveRestriction({ type: 'serverLoad' })).resolves.toEqual({ type: 'serverLoad' });
       await expect(resolveRestriction({ type: 'other', enforcement: 'other' })).resolves
@@ -319,7 +361,7 @@ describe('ActorContextPreprocessEndpointRestrictions', () => {
       [
         'with an unknown field',
         { type: 'rate', maxValue: 10, windowDuration: 1_000, windowduration: 1_000 },
-        `Restriction 0 of http://example.org/sparql has an unknown field 'windowduration'. Known fields are: type, metric, maxValue, minValue, burstValue, unit, windowDuration, retryAfterHint, returnsStatusCode, httpSignalHeader, scope, enforcement, hardRestriction, costModel`,
+        `Restriction 0 of http://example.org/sparql has an unknown field 'windowduration'. Known fields are: type, metric, maxValue, minValue, burstValue, unit, windowDuration, retryAfterHint, returnsStatusCode, httpSignalHeader, scope, enforcement, hardRestriction, costModel, penaltyThreshold, penaltyDuration, identificationHeader, identificationFormat`,
       ],
       [
         'without type or metric',
@@ -334,7 +376,7 @@ describe('ActorContextPreprocessEndpointRestrictions', () => {
       [
         'with an unknown type',
         { type: 'speed', maxValue: 10 },
-        `The type of restriction 0 of http://example.org/sparql must be one of rate, quota, resultSize, costModel, serverLoad, concurrentRequests, responseTime, other, or a VoRD restriction class such as 'vord:RateRestriction'`,
+        `The type of restriction 0 of http://example.org/sparql must be one of rate, quota, resultSize, costModel, serverLoad, concurrentRequests, responseTime, identification, other, or a VoRD restriction class such as 'vord:RateRestriction'`,
       ],
       [
         'with an unknown enforcement mode',
@@ -420,6 +462,21 @@ describe('ActorContextPreprocessEndpointRestrictions', () => {
         'with a quota without a window',
         { type: 'quota', maxValue: 1_000 },
         `Restriction 0 of http://example.org/sparql needs a windowDuration, such as 'PT1M'`,
+      ],
+      [
+        'with an unknown identification format',
+        { type: 'identification', identificationHeader: 'From', identificationFormat: 'phone' },
+        `The identificationFormat of restriction 0 of http://example.org/sparql must be one of email, productWithContact, other, or a VoRD identification format such as 'vord:EmailAddress'`,
+      ],
+      [
+        'that requires identification without a header',
+        { type: 'identification', identificationFormat: 'email' },
+        `Restriction 0 of http://example.org/sparql needs an identificationHeader, such as 'from', and an identificationFormat, such as 'email'`,
+      ],
+      [
+        'that requires identification without a format',
+        { type: 'identification', identificationHeader: 'From' },
+        `Restriction 0 of http://example.org/sparql needs an identificationHeader, such as 'from', and an identificationFormat`,
       ],
     ])('should reject a restriction %s', async(_name, restriction, message) => {
       await expect(resolveRestriction(restriction)).rejects.toThrow(message);

@@ -5,15 +5,25 @@ import { KeysHttp } from '@comunica/context-entries';
 import type { TestResult } from '@comunica/core';
 import { ActionContextKey, failTest, passTest } from '@comunica/core';
 import type { IMediatorTypeTime } from '@comunica/mediatortype-time';
-import type { IActionContext, IEndpointRestriction } from '@comunica/types';
+import type { IActionContext, IClientContact, IEndpointRestriction } from '@comunica/types';
+
+// eslint-disable-next-line import/extensions
+import { version as actorVersion } from '../package.json';
 
 /**
  * A comunica HTTP actor that respects the operational restrictions of endpoints,
- * such as rate limits and concurrent request limits, as advertised in their service descriptions.
+ * such as rate limits, concurrent request limits, usage budgets and identification requirements,
+ * as advertised in their service descriptions.
  *
  * It only acts on requests that carry endpoint restrictions in their context (KeysHttp.endpointRestrictions).
  */
 export class ActorHttpLimitRestrictions extends ActorHttp {
+  /**
+   * The product identifier that is sent with contact information to endpoints that require it in the User-Agent.
+   * It is undefined in browsers, which do not allow setting the User-Agent.
+   */
+  public static userAgent = ActorHttp.createUserAgent('ActorHttpLimitRestrictions', actorVersion);
+
   private readonly hostData: Map<string, IHostData>;
   private readonly safetyMargin: number;
   private readonly applySoftRestrictions: boolean;
@@ -73,9 +83,12 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
     try {
       signal?.throwIfAborted();
 
-      // Wait until the request fits within all request windows.
+      // Wait until the usage budget can pay for the request, and the request fits within all request windows.
       const now = Date.now();
-      const delay = ActorHttpLimitRestrictions.reserveRequestTime(hostData, now);
+      const budgetDelay = hostData.budget ? ActorHttpLimitRestrictions.reserveBudget(hostData.budget, now) : 0;
+      const requestTime = now + budgetDelay +
+        ActorHttpLimitRestrictions.reserveRequestTime(hostData, now + budgetDelay);
+      const delay = requestTime - now;
       if (delay > 0) {
         this.logDebug(action.context, 'Delaying request to respect endpoint restrictions', () => ({
           url: requestUrl.href,
@@ -84,16 +97,28 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
         try {
           await ActorHttpLimitRestrictions.sleep(delay, signal);
         } catch (error: unknown) {
-          ActorHttpLimitRestrictions.cancelRequestTime(hostData, now + delay);
+          ActorHttpLimitRestrictions.cancelRequestTime(hostData, requestTime);
+          if (hostData.budget) {
+            ActorHttpLimitRestrictions.cancelBudget(hostData.budget);
+          }
           throw error;
         }
       }
+      if (hostData.budget) {
+        // The reserved unit is now spent by a request that is sent.
+        hostData.budget.reservedUnits--;
+      }
 
+      const headers = this.getIdentificationHeaders(action, restrictions, hostData);
       const response = await this.mediatorHttp.mediate({
         ...action,
+        ...headers ? { init: { ...action.init, headers }} : {},
         context: this.getRequestContext(action.context, restrictions)
           .set(ActorHttpLimitRestrictions.keyWrapped, true),
       });
+      if (hostData.budget) {
+        ActorHttpLimitRestrictions.updateBudget(hostData.budget, response, Date.now());
+      }
 
       // Requests only occupy a slot until their body has been consumed.
       if (Number.isFinite(hostData.concurrencyLimit)) {
@@ -132,11 +157,18 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
   public createHostData(restrictions: IEndpointRestriction[]): IHostData {
     const windows: IRequestWindow[] = [];
     let concurrencyLimit = Number.POSITIVE_INFINITY;
+    let budget: IUsageBudget | undefined;
     for (const restriction of restrictions) {
       if (!restriction.maxValue || restriction.maxValue <= 0) {
         continue;
       }
-      if ((restriction.type === 'rate' || restriction.type === 'quota') && restriction.windowDuration) {
+      if (restriction.type === 'costModel' && restriction.windowDuration) {
+        // A usage budget of cost units per window; the most restrictive one is used.
+        const candidate = this.createBudget(restriction);
+        if (!budget || candidate.refillPerMs < budget.refillPerMs) {
+          budget = candidate;
+        }
+      } else if ((restriction.type === 'rate' || restriction.type === 'quota') && restriction.windowDuration) {
         windows.push(this.createWindow(restriction.maxValue, restriction.windowDuration));
         if (restriction.burstValue && restriction.burstValue > 0 && restriction.burstValue < restriction.maxValue) {
           windows.push(this.createWindow(
@@ -155,7 +187,150 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
       concurrencyLimit,
       activeRequests: 0,
       pendingRequests: [],
+      ...budget ? { budget } : {},
     };
+  }
+
+  /**
+   * Create the client-side view of a usage budget: maxValue cost units per windowDuration,
+   * of which at most burstValue (or else maxValue) can be spent at once.
+   * The safety margin reduces both the capacity and the rate at which it is restored.
+   * @param restriction A cost model restriction with a window and a maximum value.
+   */
+  public createBudget(restriction: IEndpointRestriction): IUsageBudget {
+    const capacity = Math.max(1, Math.floor((restriction.burstValue ?? restriction.maxValue!) * this.safetyMargin));
+    return {
+      capacity,
+      refillPerMs: restriction.maxValue! * this.safetyMargin / restriction.windowDuration!,
+      units: capacity,
+      updatedAt: Date.now(),
+      reservedUnits: 0,
+      remainingHeader: restriction.httpSignalHeader,
+      statusCode: restriction.returnsStatusCode,
+    };
+  }
+
+  /**
+   * Restore the units of a usage budget for the time that has passed.
+   * Units that are reserved by requests that were not sent yet do not count towards the capacity.
+   * @param budget A usage budget.
+   * @param now The current timestamp.
+   */
+  public static refillBudget(budget: IUsageBudget, now: number): void {
+    budget.units = Math.min(
+      budget.capacity - budget.reservedUnits,
+      budget.units + (Math.max(0, now - budget.updatedAt) * budget.refillPerMs),
+    );
+    budget.updatedAt = Math.max(budget.updatedAt, now);
+  }
+
+  /**
+   * Reserve the minimum cost of one unit of a usage budget for a request,
+   * and determine how long the request must wait until the budget can pay for it.
+   * Requests often cost more than one unit; the remaining budget that the endpoint reports corrects this
+   * (see updateBudget).
+   * @param budget A usage budget.
+   * @param now The current timestamp.
+   * @return The number of milliseconds to wait before sending the request.
+   */
+  public static reserveBudget(budget: IUsageBudget, now: number): number {
+    ActorHttpLimitRestrictions.refillBudget(budget, now);
+    budget.units--;
+    budget.reservedUnits++;
+    return budget.units >= 0 ? 0 : Math.ceil(-budget.units / budget.refillPerMs);
+  }
+
+  /**
+   * Cancel the reservation of a request that was not sent.
+   * @param budget A usage budget.
+   */
+  public static cancelBudget(budget: IUsageBudget): void {
+    budget.units++;
+    budget.reservedUnits--;
+  }
+
+  /**
+   * Correct a usage budget with the remaining budget that the endpoint reports in a response,
+   * or with an empty budget if the endpoint rejected the request because the budget was spent.
+   * Only lower values are taken over, so that responses that arrive out of order cannot overspend the budget.
+   * @param budget A usage budget.
+   * @param response The response to a request that was paid from the budget.
+   * @param now The current timestamp.
+   */
+  public static updateBudget(budget: IUsageBudget, response: Response, now: number): void {
+    let remaining: number | undefined;
+    const header = budget.remainingHeader ? response.headers.get(budget.remainingHeader) : null;
+    if (header !== null && Number.isFinite(Number.parseFloat(header))) {
+      remaining = Number.parseFloat(header);
+    } else if (response.status === budget.statusCode) {
+      remaining = 0;
+    }
+    if (remaining !== undefined) {
+      ActorHttpLimitRestrictions.refillBudget(budget, now);
+      budget.units = Math.min(budget.units, remaining - budget.reservedUnits);
+    }
+  }
+
+  /**
+   * Determine the headers with which a request identifies the engine to an endpoint that requires identification.
+   * Contact information is only sent to endpoints whose restrictions require it.
+   * @param action An HTTP action.
+   * @param restrictions The applicable restrictions of the endpoint.
+   * @param hostData The data of the endpoint's host.
+   * @return The headers of the request with the identification, or undefined if no identification is required.
+   */
+  public getIdentificationHeaders(
+    action: IActionHttp,
+    restrictions: IEndpointRestriction[],
+    hostData: IHostData,
+  ): Headers | undefined {
+    const required = restrictions.filter(restriction => restriction.type === 'identification' &&
+      restriction.identificationHeader);
+    if (required.length === 0) {
+      return undefined;
+    }
+    const contact = action.context.get(KeysHttp.clientContact);
+    const headers = new Headers(action.init?.headers);
+    for (const restriction of required) {
+      const value = ActorHttpLimitRestrictions
+        .getIdentification(restriction, contact, headers.get(restriction.identificationHeader!));
+      if (value) {
+        headers.set(restriction.identificationHeader!, value);
+      } else if (!hostData.identificationWarned) {
+        hostData.identificationWarned = true;
+        const message = 'An endpoint requires identification that the client contact cannot provide';
+        this.logWarn(action.context, message, () => ({
+          url: ActorHttp.getInputUrl(action.input).href,
+          header: restriction.identificationHeader,
+          format: restriction.identificationFormat,
+          contact: `Set ${KeysHttp.clientContact.name} with an email address and, optionally, a URL`,
+        }));
+      }
+    }
+    return headers;
+  }
+
+  /**
+   * Determine the value of an identification header.
+   * @param restriction An identification restriction.
+   * @param contact The contact information of the engine, if any.
+   * @param current The current value of the header, if any, such as a User-Agent set by the user.
+   * @return The value, or undefined if the contact information cannot provide it.
+   */
+  public static getIdentification(
+    restriction: IEndpointRestriction,
+    contact: IClientContact | undefined,
+    current: string | null,
+  ): string | undefined {
+    if (restriction.identificationFormat === 'email') {
+      return contact?.email;
+    }
+    if (restriction.identificationFormat === 'productWithContact') {
+      const details = [ contact?.url, contact?.email ].filter(Boolean);
+      const product = current ?? ActorHttpLimitRestrictions.userAgent;
+      return details.length > 0 && product ? `${product} (${details.join('; ')})` : undefined;
+    }
+    return undefined;
   }
 
   /**
@@ -173,8 +348,9 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
   /**
    * Determine the context for the wrapped request, based on the endpoint restrictions.
    * - Response time restrictions that reject requests set the request timeout, unless a timeout was already set.
-   * - Status codes of rate, quota, and concurrency restrictions are added to the status codes that are retried.
-   * - Retry hints of rate, quota, and concurrency restrictions set the fallback retry delay,
+   * - Status codes of rate, quota, concurrency, and usage budget restrictions are added to the status codes
+   *   that are retried, unless the endpoint blocks the client at the first violation (penaltyThreshold 1).
+   * - Retry hints of rate, quota, concurrency, and usage budget restrictions set the fallback retry delay,
    *   unless a fallback delay was already set.
    * @param context The context of the request.
    * @param restrictions The applicable restrictions of the endpoint.
@@ -189,8 +365,10 @@ export class ActorHttpLimitRestrictions extends ActorHttp {
           maxEvaluationTimes.push(restriction.maxValue);
         }
       } else if (restriction.type === 'rate' || restriction.type === 'quota' ||
-        restriction.type === 'concurrentRequests') {
-        if (restriction.returnsStatusCode) {
+        restriction.type === 'concurrentRequests' ||
+        (restriction.type === 'costModel' && restriction.windowDuration !== undefined)) {
+        // Retrying is pointless when the endpoint blocks the client at the first violation.
+        if (restriction.returnsStatusCode && restriction.penaltyThreshold !== 1) {
           retryStatusCodes.push(restriction.returnsStatusCode);
         }
         if (restriction.retryAfterHint) {
@@ -412,6 +590,46 @@ export interface IHostData {
    * Callbacks of requests that are waiting for a slot.
    */
   pendingRequests: (() => void)[];
+  /**
+   * The usage budget of cost units, if the endpoint has one.
+   */
+  budget?: IUsageBudget;
+  /**
+   * If a warning was logged that the engine cannot identify itself to this host.
+   */
+  identificationWarned?: boolean;
+}
+
+export interface IUsageBudget {
+  /**
+   * The maximum number of units that can be spent at once, with the safety margin applied.
+   */
+  capacity: number;
+  /**
+   * The number of units that are restored per millisecond, with the safety margin applied.
+   */
+  refillPerMs: number;
+  /**
+   * The units that are available at updatedAt, minus the units reserved by requests that are waiting.
+   * It is negative while requests wait for the budget to be restored.
+   */
+  units: number;
+  /**
+   * The timestamp at which units was determined.
+   */
+  updatedAt: number;
+  /**
+   * The number of units reserved by requests that are waiting to be sent.
+   */
+  reservedUnits: number;
+  /**
+   * The (lowercase) name of the header in which the endpoint reports the remaining budget, if any.
+   */
+  remainingHeader?: string;
+  /**
+   * The status code with which the endpoint rejects requests when the budget is spent, if known.
+   */
+  statusCode?: number;
 }
 
 export interface IActorHttpLimitRestrictionsArgs extends IActorHttpArgs {

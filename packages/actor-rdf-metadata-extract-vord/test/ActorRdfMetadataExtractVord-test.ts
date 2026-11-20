@@ -268,6 +268,7 @@ describe('ActorRdfMetadataExtractVord', () => {
       [ 'ServerLoadRestriction', 'serverLoad' ],
       [ 'ConcurrentRequestsRestriction', 'concurrentRequests' ],
       [ 'ResponseTimeRestriction', 'responseTime' ],
+      [ 'IdentificationRestriction', 'identification' ],
     ])('should map class %s to type %s', (className, type) => {
       expect(ActorRdfMetadataExtractVord.parseRestriction([
         DF.quad(restriction, RDF_TYPE, vord(className)),
@@ -280,6 +281,8 @@ describe('ActorRdfMetadataExtractVord', () => {
       [ 'resultBindings', 'resultSize' ],
       [ 'evaluationTime', 'responseTime' ],
       [ 'estimatedCostUnits', 'costModel' ],
+      [ 'costUnitsPerWindow', 'costModel' ],
+      [ 'concurrentRequests', 'concurrentRequests' ],
     ])('should map metric %s to type %s if no specific class is given', (metric, type) => {
       expect(ActorRdfMetadataExtractVord.parseRestriction([
         DF.quad(restriction, RDF_TYPE, vord('Restriction')),
@@ -309,6 +312,47 @@ describe('ActorRdfMetadataExtractVord', () => {
       expect(ActorRdfMetadataExtractVord.parseRestriction([
         DF.quad(restriction, vord('enforcement'), vord(enforcement)),
       ])).toEqual({ type: 'other', enforcement: value });
+    });
+
+    it('should parse usage budgets with penalties', () => {
+      expect(ActorRdfMetadataExtractVord.parseRestriction([
+        DF.quad(restriction, RDF_TYPE, vord('CostModelRestriction')),
+        DF.quad(restriction, vord('metric'), vord('costUnitsPerWindow')),
+        DF.quad(restriction, vord('maxValue'), typed('600', 'integer')),
+        DF.quad(restriction, vord('burstValue'), typed('200', 'integer')),
+        DF.quad(restriction, vord('windowDuration'), typed('PT1M', 'duration')),
+        DF.quad(restriction, vord('penaltyThreshold'), typed('1', 'integer')),
+        DF.quad(restriction, vord('penaltyDuration'), typed('PT10M', 'duration')),
+        DF.quad(restriction, vord('httpSignalHeader'), DF.namedNode('https://example.org/headers#x-ratelimit-remaining')),
+      ])).toEqual({
+        type: 'costModel',
+        metric: `${VORD}costUnitsPerWindow`,
+        maxValue: 600,
+        burstValue: 200,
+        windowDuration: 60_000,
+        penaltyThreshold: 1,
+        penaltyDuration: 600_000,
+        httpSignalHeader: 'x-ratelimit-remaining',
+      });
+    });
+
+    it.each([
+      [ 'EmailAddress', 'email' ],
+      [ 'ProductWithContact', 'productWithContact' ],
+    ])('should parse identification restrictions with format %s', (format, value) => {
+      expect(ActorRdfMetadataExtractVord.parseRestriction([
+        DF.quad(restriction, RDF_TYPE, vord('IdentificationRestriction')),
+        DF.quad(restriction, vord('identificationHeader'), DF.namedNode('http://www.w3.org/2011/http-headers#From')),
+        DF.quad(restriction, vord('identificationFormat'), vord(format)),
+      ])).toEqual({ type: 'identification', identificationHeader: 'from', identificationFormat: value });
+    });
+
+    it('should map unknown identification formats to other', () => {
+      expect(ActorRdfMetadataExtractVord.parseRestriction([
+        DF.quad(restriction, RDF_TYPE, vord('IdentificationRestriction')),
+        DF.quad(restriction, vord('identificationHeader'), DF.literal('X-Api-Key')),
+        DF.quad(restriction, vord('identificationFormat'), DF.namedNode('https://example.org/ApiKey')),
+      ])).toEqual({ type: 'identification', identificationHeader: 'x-api-key', identificationFormat: 'other' });
     });
 
     it('should keep explicit windows for daily request counts', () => {

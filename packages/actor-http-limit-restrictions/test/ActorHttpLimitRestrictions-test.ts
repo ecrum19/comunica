@@ -3,7 +3,7 @@ import type { IActionHttpInvalidate } from '@comunica/bus-http-invalidate';
 import { KeysHttp } from '@comunica/context-entries';
 import { ActionContext, Bus } from '@comunica/core';
 import type { IActionContext, IEndpointRestriction } from '@comunica/types';
-import type { IHostData, IRequestWindow } from '../lib/ActorHttpLimitRestrictions';
+import type { IHostData, IRequestWindow, IUsageBudget } from '../lib/ActorHttpLimitRestrictions';
 import { ActorHttpLimitRestrictions } from '../lib/ActorHttpLimitRestrictions';
 import '@comunica/utils-jest';
 
@@ -220,6 +220,22 @@ describe('ActorHttpLimitRestrictions', () => {
       expect(context.get(KeysHttp.httpRetryDelayFallback)).toBe(60_000);
     });
 
+    it('should retry the status codes of usage budgets, but not of per-request cost limits', () => {
+      const context = actor.getRequestContext(new ActionContext(), [
+        { type: 'costModel', maxValue: 600, windowDuration: 60_000, returnsStatusCode: 429 },
+        { type: 'costModel', maxValue: 200_000, returnsStatusCode: 413 },
+      ]);
+      expect(context.get(KeysHttp.httpRetryStatusCodes)).toEqual([ 429 ]);
+    });
+
+    it('should not retry the status codes of restrictions that block the client at the first violation', () => {
+      const context = actor.getRequestContext(new ActionContext(), [
+        { type: 'rate', maxValue: 10, windowDuration: 1_000, returnsStatusCode: 403, penaltyThreshold: 1 },
+        { type: 'concurrentRequests', maxValue: 5, returnsStatusCode: 429, penaltyThreshold: 30 },
+      ]);
+      expect(context.get(KeysHttp.httpRetryStatusCodes)).toEqual([ 429 ]);
+    });
+
     it('should not override an existing timeout and retry delay', () => {
       const context = actor.getRequestContext(new ActionContext({
         [KeysHttp.httpTimeout.name]: 1_000,
@@ -229,6 +245,179 @@ describe('ActorHttpLimitRestrictions', () => {
       expect(context.get(KeysHttp.httpTimeout)).toBe(1_000);
       expect(context.get(KeysHttp.httpRetryDelayFallback)).toBe(2_000);
       expect(context.get(KeysHttp.httpRetryStatusCodes)).toEqual([ 500, 429 ]);
+    });
+  });
+
+  describe('usage budgets', () => {
+    const budgetRestriction: IEndpointRestriction = {
+      type: 'costModel',
+      maxValue: 600,
+      burstValue: 200,
+      windowDuration: 60_000,
+      httpSignalHeader: 'x-ratelimit-remaining',
+      returnsStatusCode: 429,
+    };
+
+    function budgetWith(units: number, capacity = 10): IUsageBudget {
+      return { capacity, refillPerMs: 0.001, units, updatedAt: 0, reservedUnits: 0, statusCode: 429 };
+    }
+
+    beforeEach(() => {
+      jest.spyOn(Date, 'now').mockReturnValue(5);
+    });
+
+    it('should create the most restrictive budget, with the safety margin', () => {
+      expect(actor.createHostData([
+        budgetRestriction,
+        { type: 'costModel', maxValue: 60, windowDuration: 60_000 },
+        { type: 'costModel', maxValue: 6_000, windowDuration: 60_000 },
+        { type: 'costModel', maxValue: 100 },
+      ]).budget).toEqual({
+        capacity: 54,
+        refillPerMs: 60 * 0.9 / 60_000,
+        units: 54,
+        updatedAt: 5,
+        reservedUnits: 0,
+      });
+      expect(actor.createBudget(budgetRestriction)).toEqual({
+        capacity: 180,
+        refillPerMs: 600 * 0.9 / 60_000,
+        units: 180,
+        updatedAt: 5,
+        reservedUnits: 0,
+        remainingHeader: 'x-ratelimit-remaining',
+        statusCode: 429,
+      });
+    });
+
+    it('should allow a budget to pay for at least one request at once', () => {
+      expect(actor.createBudget({ type: 'costModel', maxValue: 1, windowDuration: 1_000 }).capacity).toBe(1);
+    });
+
+    it('should not create a budget without a usage budget restriction', () => {
+      expect(actor.createHostData([ rateRestriction ]).budget).toBeUndefined();
+    });
+
+    it('should refill a budget up to its capacity, minus the units of waiting requests', () => {
+      const budget = budgetWith(0);
+      ActorHttpLimitRestrictions.refillBudget(budget, 4_000);
+      expect(budget).toMatchObject({ units: 4, updatedAt: 4_000 });
+      budget.reservedUnits = 3;
+      ActorHttpLimitRestrictions.refillBudget(budget, 100_000);
+      expect(budget).toMatchObject({ units: 7, updatedAt: 100_000 });
+      ActorHttpLimitRestrictions.refillBudget(budget, 50_000);
+      expect(budget).toMatchObject({ units: 7, updatedAt: 100_000 });
+    });
+
+    it('should delay requests that the budget cannot pay for yet', () => {
+      const budget = budgetWith(2);
+      expect(ActorHttpLimitRestrictions.reserveBudget(budget, 0)).toBe(0);
+      expect(ActorHttpLimitRestrictions.reserveBudget(budget, 0)).toBe(0);
+      expect(ActorHttpLimitRestrictions.reserveBudget(budget, 0)).toBe(1_000);
+      expect(ActorHttpLimitRestrictions.reserveBudget(budget, 0)).toBe(2_000);
+      expect(budget).toMatchObject({ units: -2, reservedUnits: 4 });
+      ActorHttpLimitRestrictions.cancelBudget(budget);
+      expect(budget).toMatchObject({ units: -1, reservedUnits: 3 });
+    });
+
+    it('should take over lower remaining budgets that the endpoint reports', () => {
+      const budget = { ...budgetWith(10), remainingHeader: 'x-ratelimit-remaining', reservedUnits: 2 };
+      ActorHttpLimitRestrictions.updateBudget(budget, new Response('', {
+        headers: { 'x-ratelimit-remaining': '5' },
+      }), 0);
+      expect(budget.units).toBe(3);
+      ActorHttpLimitRestrictions.updateBudget(budget, new Response('', {
+        headers: { 'x-ratelimit-remaining': '50' },
+      }), 0);
+      expect(budget.units).toBe(3);
+    });
+
+    it('should empty the budget when the endpoint rejects a request because the budget is spent', () => {
+      const budget = { ...budgetWith(10), remainingHeader: 'x-ratelimit-remaining' };
+      ActorHttpLimitRestrictions.updateBudget(budget, new Response('', {
+        status: 429,
+        headers: { 'x-ratelimit-remaining': 'unknown' },
+      }), 0);
+      expect(budget.units).toBe(0);
+      const withoutHeader = budgetWith(10);
+      ActorHttpLimitRestrictions.updateBudget(withoutHeader, new Response('', { status: 429 }), 0);
+      expect(withoutHeader.units).toBe(0);
+    });
+
+    it('should keep the budget for responses without information about it', () => {
+      const budget = { ...budgetWith(10), remainingHeader: 'x-ratelimit-remaining' };
+      ActorHttpLimitRestrictions.updateBudget(budget, new Response(''), 0);
+      expect(budget.units).toBe(10);
+    });
+  });
+
+  describe('identification', () => {
+    const fromRestriction: IEndpointRestriction = {
+      type: 'identification',
+      identificationHeader: 'from',
+      identificationFormat: 'email',
+    };
+    const userAgentRestriction: IEndpointRestriction = {
+      type: 'identification',
+      identificationHeader: 'user-agent',
+      identificationFormat: 'productWithContact',
+    };
+    const contact = { email: 'bench@example.org', url: 'https://example.org/bench' };
+
+    function identify(
+      restrictions: IEndpointRestriction[],
+      clientContact?: object,
+      init?: RequestInit,
+      hostData = actor.createHostData([]),
+    ): Headers | undefined {
+      const context = new ActionContext(clientContact ? { [KeysHttp.clientContact.name]: clientContact } : {});
+      return actor.getIdentificationHeaders({ context, input: url, init }, restrictions, hostData);
+    }
+
+    beforeEach(() => {
+      jest.spyOn(<any>actor, 'logWarn').mockImplementation((...args) => (<() => unknown>args[2])());
+    });
+
+    it('should not add headers to endpoints that do not require identification', () => {
+      expect(identify([ rateRestriction, { type: 'identification' }], contact)).toBeUndefined();
+    });
+
+    it('should send the email address in the From header', () => {
+      expect(identify([ fromRestriction ], contact)!.get('from')).toBe('bench@example.org');
+    });
+
+    it('should add contact information to the User-Agent', () => {
+      expect(identify([ userAgentRestriction ], contact)!.get('user-agent'))
+        .toBe(`${ActorHttpLimitRestrictions.userAgent} (https://example.org/bench; bench@example.org)`);
+      expect(Object.fromEntries(identify([ userAgentRestriction ], { email: 'bench@example.org' }, {
+        headers: { 'user-agent': 'Bench/1.0', accept: 'text/turtle' },
+      })!)).toEqual({ 'user-agent': 'Bench/1.0 (bench@example.org)', accept: 'text/turtle' });
+    });
+
+    it('should warn once per host if the contact cannot provide the identification', () => {
+      const hostData = actor.createHostData([]);
+      expect(identify([ fromRestriction ], undefined, undefined, hostData)!.get('from')).toBeNull();
+      expect(identify([ fromRestriction ], { url: contact.url }, undefined, hostData)!.get('from')).toBeNull();
+      expect((<any>actor).logWarn).toHaveBeenCalledTimes(1);
+      expect(hostData.identificationWarned).toBe(true);
+    });
+
+    it('should not provide identification in unknown formats', () => {
+      expect(ActorHttpLimitRestrictions.getIdentification(
+        { type: 'identification', identificationHeader: 'x-api-key', identificationFormat: 'other' },
+        contact,
+        null,
+      )).toBeUndefined();
+    });
+
+    it('should not provide a User-Agent with contact information without a product identifier', () => {
+      const userAgent = ActorHttpLimitRestrictions.userAgent;
+      ActorHttpLimitRestrictions.userAgent = undefined;
+      try {
+        expect(ActorHttpLimitRestrictions.getIdentification(userAgentRestriction, contact, null)).toBeUndefined();
+      } finally {
+        ActorHttpLimitRestrictions.userAgent = userAgent;
+      }
     });
   });
 
@@ -517,6 +706,52 @@ describe('ActorHttpLimitRestrictions', () => {
       await expect(pending).rejects.toThrow('aborted');
       expect(mediatorHttp.mediate).toHaveBeenCalledTimes(1);
       expect(actorHostData.get(host)!.requestTimestamps).toEqual([ 0 ]);
+    });
+
+    it('should pace requests on the usage budget that the endpoint reports', async() => {
+      jest.spyOn(mediatorHttp, 'mediate')
+        .mockImplementation(async() => new Response('body', { headers: { 'x-remaining': '0' }}));
+      const context = contextWith([{
+        type: 'costModel',
+        maxValue: 1,
+        windowDuration: 1_000,
+        httpSignalHeader: 'x-remaining',
+      }]);
+      await actor.run({ context, input: url });
+      await actor.run({ context, input: url });
+      expect(globalThis.setTimeout).toHaveBeenCalledTimes(1);
+      expect(globalThis.setTimeout).toHaveBeenNthCalledWith(1, expect.any(Function), 1_112);
+      expect(mediatorHttp.mediate).toHaveBeenCalledTimes(2);
+      expect(actorHostData.get(host)!.budget).toMatchObject({ reservedUnits: 0 });
+    });
+
+    it('should cancel the budget reservation of requests that are aborted while delayed', async() => {
+      jest.spyOn(mediatorHttp, 'mediate').mockImplementation(async() => new Response('body'));
+      const context = contextWith([{ type: 'costModel', maxValue: 1, windowDuration: 1_000 }]);
+      await actor.run({ context, input: url });
+      jest.spyOn(globalThis, 'setTimeout').mockImplementation(<any> (() => 0));
+      const controller = new AbortController();
+      const pending = actor.run({ context, input: url, init: { signal: controller.signal }});
+      await new Promise(setImmediate);
+      expect(actorHostData.get(host)!.budget).toMatchObject({ units: -1, reservedUnits: 1 });
+
+      controller.abort(new Error('aborted'));
+      await expect(pending).rejects.toThrow('aborted');
+      expect(mediatorHttp.mediate).toHaveBeenCalledTimes(1);
+      expect(actorHostData.get(host)!.budget).toMatchObject({ units: 0, reservedUnits: 0 });
+    });
+
+    it('should identify requests to endpoints that require it', async() => {
+      jest.spyOn(mediatorHttp, 'mediate').mockImplementation(async() => new Response('body'));
+      const context = contextWith([{
+        type: 'identification',
+        identificationHeader: 'from',
+        identificationFormat: 'email',
+      }]).set(KeysHttp.clientContact, { email: 'bench@example.org' });
+      await actor.run({ context, input: url, init: { method: 'POST' }});
+      const action = jest.mocked(mediatorHttp.mediate).mock.calls[0][0];
+      expect(action.init!.method).toBe('POST');
+      expect(new Headers(action.init!.headers).get('from')).toBe('bench@example.org');
     });
 
     it('should release slots of failed requests', async() => {

@@ -10,6 +10,7 @@ import { KeysInitQuery, KeysQuerySourceIdentify } from '@comunica/context-entrie
 import type { IActorTest, TestResult } from '@comunica/core';
 import { passTestVoid } from '@comunica/core';
 import type {
+  EndpointIdentificationFormat,
   EndpointRestrictionEnforcement,
   EndpointRestrictionType,
   IActionContext,
@@ -22,6 +23,10 @@ const VORD = 'https://w3id.org/vord#';
 // The names of restriction types and enforcement modes, as used in IEndpointRestriction.
 const TYPES = new Set<string>([ ...Object.values(ActorRdfMetadataExtractVord.RESTRICTION_TYPES), 'other' ]);
 const ENFORCEMENTS = new Set<string>([ ...Object.values(ActorRdfMetadataExtractVord.ENFORCEMENTS), 'other' ]);
+const IDENTIFICATION_FORMATS = new Set<string>([
+  ...Object.values(ActorRdfMetadataExtractVord.IDENTIFICATION_FORMATS),
+  'other',
+]);
 
 // The values of the endpointRestrictionsMode context entry.
 const MODES = new Set<string>([ 'replace', 'compare', 'provided-only' ]);
@@ -42,6 +47,10 @@ const FIELDS = [
   'enforcement',
   'hardRestriction',
   'costModel',
+  'penaltyThreshold',
+  'penaltyDuration',
+  'identificationHeader',
+  'identificationFormat',
 ];
 
 /**
@@ -172,6 +181,7 @@ export class ActorContextPreprocessEndpointRestrictions extends ActorContextPrep
         case 'maxValue':
         case 'minValue':
         case 'burstValue':
+        case 'penaltyThreshold':
           restriction[field] = ActorContextPreprocessEndpointRestrictions.parseNumber(value, fieldName);
           break;
         case 'returnsStatusCode':
@@ -179,10 +189,15 @@ export class ActorContextPreprocessEndpointRestrictions extends ActorContextPrep
           break;
         case 'windowDuration':
         case 'retryAfterHint':
+        case 'penaltyDuration':
           restriction[field] = ActorContextPreprocessEndpointRestrictions.parseDuration(value, fieldName);
           break;
         case 'httpSignalHeader':
+        case 'identificationHeader':
           restriction[field] = ActorContextPreprocessEndpointRestrictions.parseString(value, fieldName).toLowerCase();
+          break;
+        case 'identificationFormat':
+          restriction[field] = ActorContextPreprocessEndpointRestrictions.parseIdentificationFormat(value, fieldName);
           break;
         case 'enforcement':
           restriction[field] = ActorContextPreprocessEndpointRestrictions.parseEnforcement(value, fieldName);
@@ -217,6 +232,9 @@ export class ActorContextPreprocessEndpointRestrictions extends ActorContextPrep
     if ((type === 'rate' || type === 'quota') && restriction.windowDuration === undefined) {
       throw new Error(`${name} needs a windowDuration, such as 'PT1M'`);
     }
+    if (type === 'identification' && (!restriction.identificationHeader || !restriction.identificationFormat)) {
+      throw new Error(`${name} needs an identificationHeader, such as 'from', and an identificationFormat, such as 'email'`);
+    }
 
     return { type, ...restriction };
   }
@@ -237,6 +255,24 @@ export class ActorContextPreprocessEndpointRestrictions extends ActorContextPrep
       throw new Error(`${name} must be one of ${[ ...TYPES ].join(', ')}, or a VoRD restriction class such as 'vord:RateRestriction'`);
     }
     return type;
+  }
+
+  /**
+   * Parse an identification format, given as a name or as a VoRD identification format.
+   * @param value A value.
+   * @param name A name for the value in error messages.
+   */
+  public static parseIdentificationFormat(value: unknown, name: string): EndpointIdentificationFormat {
+    const string = ActorContextPreprocessEndpointRestrictions.parseString(value, name);
+    if (IDENTIFICATION_FORMATS.has(string)) {
+      return <EndpointIdentificationFormat> string;
+    }
+    const iri = ActorContextPreprocessEndpointRestrictions.expandIri(string);
+    const format = ActorRdfMetadataExtractVord.IDENTIFICATION_FORMATS[iri];
+    if (!format) {
+      throw new Error(`${name} must be one of ${[ ...IDENTIFICATION_FORMATS ].join(', ')}, or a VoRD identification format such as 'vord:EmailAddress'`);
+    }
+    return format;
   }
 
   /**

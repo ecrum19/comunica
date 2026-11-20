@@ -360,3 +360,89 @@ describe('System test: QuerySparql with endpoint restrictions provided by the us
     );
   });
 });
+
+describe('System test: QuerySparql with endpoints that require identification or have a usage budget', () => {
+  let engine: QueryEngine;
+
+  beforeAll(() => {
+    engine = new QueryEngine();
+  });
+
+  it('identifies itself only to the endpoints that require it', async() => {
+    const identified = 'http://identified.example.org/sparql';
+    const open = 'http://open.example.org/sparql';
+    const fromHeaders: Record<string, (string | null)[]> = { [identified]: [], [open]: []};
+    const descriptions: Record<string, string> = {
+      [identified]: createServiceDescription(identified, `;
+  vord:hasRestriction <#contact> .
+
+<#contact> a vord:Restriction, vord:IdentificationRestriction ;
+  vord:identificationHeader <http://www.w3.org/2011/http-headers#from> ;
+  vord:identificationFormat vord:EmailAddress ;
+  vord:enforcement vord:RejectRequest ;
+  vord:hardRestriction true `),
+      [open]: createServiceDescription(open, ''),
+    };
+    const fetchers = Object.fromEntries(Object.entries(descriptions)
+      .map(([ endpoint, description ]) => [ endpoint, createEndpointFetch(description, 2, 10, []) ]));
+    const bindings = await (await engine.queryBindings('SELECT ?o WHERE { <http://example.org/s> <http://example.org/p> ?o }', {
+      sources: [ identified, open ],
+      '@comunica/bus-http:client-contact': { email: 'bench@example.org' },
+      fetch: async(input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        const endpoint = Object.keys(fetchers).find(candidate => url.startsWith(candidate))!;
+        const query = init?.body ?
+          new URLSearchParams(String(init.body)).get('query') :
+          new URL(url).searchParams.get('query');
+        if (query) {
+          fromHeaders[endpoint].push(new Headers(init?.headers).get('from'));
+        }
+        return fetchers[endpoint](input, init);
+      },
+    })).toArray();
+
+    expect(bindings).toHaveLength(4);
+    expect(fromHeaders[identified].length).toBeGreaterThan(0);
+    expect(fromHeaders[identified].every(from => from === 'bench@example.org')).toBe(true);
+    expect(fromHeaders[open].length).toBeGreaterThan(0);
+    expect(fromHeaders[open].every(from => from === null)).toBe(true);
+  });
+
+  it('spaces out requests according to the remaining usage budget that the endpoint reports', async() => {
+    const endpoint = 'http://metered.example.org/sparql';
+    const requests: IEndpointRequest[] = [];
+    const endpointFetch = createEndpointFetch(createServiceDescription(endpoint, `;
+  vord:hasRestriction <#results>, <#budget> .
+
+<#results> a vord:Restriction, vord:ResultSizeRestriction ;
+  vord:metric vord:resultBindings ;
+  vord:maxValue "2"^^xsd:integer ;
+  vord:enforcement vord:TruncateResult ;
+  vord:hardRestriction true .
+
+<#budget> a vord:Restriction, vord:CostModelRestriction ;
+  vord:metric vord:costUnitsPerWindow ;
+  vord:maxValue "1"^^xsd:integer ;
+  vord:windowDuration "PT0.2S"^^xsd:duration ;
+  vord:costModel <#units> ;
+  vord:httpSignalHeader <https://example.org/headers#x-ratelimit-remaining> ;
+  vord:returnsStatusCode "429"^^xsd:integer ;
+  vord:enforcement vord:RejectRequest ;
+  vord:hardRestriction true `), 5, 2, requests);
+    const bindings = await (await engine.queryBindings('SELECT ?o WHERE { <http://example.org/s> <http://example.org/p> ?o }', {
+      sources: [ endpoint ],
+      fetch: async(input: RequestInfo | URL, init?: RequestInit) => {
+        const response = await endpointFetch(input, init);
+        response.headers.set('x-ratelimit-remaining', '0');
+        return response;
+      },
+    })).toArray();
+
+    expect(bindings).toHaveLength(5);
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    // After the first request, the budget of one unit per 0.2 s (with the safety margin) paces the others.
+    for (let i = 1; i < requests.length; i++) {
+      expect(requests[i].time - requests[i - 1].time).toBeGreaterThanOrEqual(180);
+    }
+  });
+});

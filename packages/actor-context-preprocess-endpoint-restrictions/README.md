@@ -123,12 +123,12 @@ The fields correspond to the properties of `vord:Restriction` in the VoRD vocabu
 
 | Field | Value | VoRD property |
 |---|---|---|
-| `type` | `rate`, `quota`, `resultSize`, `concurrentRequests`, `responseTime`, `costModel`, `serverLoad` or `other`, or a VoRD restriction class such as `vord:RateRestriction`. May be omitted if it follows from the `metric`. | `rdf:type` |
+| `type` | `rate`, `quota`, `resultSize`, `concurrentRequests`, `responseTime`, `costModel`, `serverLoad`, `identification` or `other`, or a VoRD restriction class such as `vord:RateRestriction`. May be omitted if it follows from the `metric`. | `rdf:type` |
 | `maxValue` | The limit, a number. See below for its meaning per type. | `vord:maxValue` |
 | `windowDuration` | The window in which a rate or quota is counted: a number of milliseconds, or an [xsd:duration](https://www.w3.org/TR/xmlschema11-2/#duration) such as `'PT1M'` (one minute) or `'P1D'` (one day). | `vord:windowDuration` |
-| `burstValue` | For rate and quota restrictions: the number of requests that may be sent in a short burst. | `vord:burstValue` |
+| `burstValue` | For rate and quota restrictions: the number of requests that may be sent in a short burst. For usage budgets: the number of cost units that may be spent at once. | `vord:burstValue` |
 | `minValue` | A minimum threshold, a number. | `vord:minValue` |
-| `metric` | The measured metric, an IRI: `vord:requestsPerWindow`, `vord:requestsPerDay`, `vord:resultBindings`, `vord:evaluationTime` or `vord:estimatedCostUnits`. | `vord:metric` |
+| `metric` | The measured metric, an IRI: `vord:requestsPerWindow`, `vord:requestsPerDay`, `vord:resultBindings`, `vord:evaluationTime`, `vord:concurrentRequests`, `vord:estimatedCostUnits` or `vord:costUnitsPerWindow`. | `vord:metric` |
 | `unit` | The unit of the threshold values, an IRI. | `vord:unit` |
 | `returnsStatusCode` | The HTTP status code that the endpoint returns when the restriction is exceeded, such as `429`. | `vord:returnsStatusCode` |
 | `retryAfterHint` | How long to wait before retrying: milliseconds, or an xsd:duration. | `vord:retryAfterHint` |
@@ -137,6 +137,10 @@ The fields correspond to the properties of `vord:Restriction` in the VoRD vocabu
 | `enforcement` | What the endpoint does when the restriction is reached: `reject`, `truncate`, `queue`, `throttle`, `degrade` or `other`, or a VoRD enforcement mode such as `vord:RejectRequest`. | `vord:enforcement` |
 | `hardRestriction` | `true` if the restriction is strictly enforced, `false` if it is advisory. Defaults to strictly enforced. | `vord:hardRestriction` |
 | `costModel` | The cost model of a cost model restriction, an IRI. | `vord:costModel` |
+| `penaltyThreshold` | The number of violations within `penaltyDuration` after which the endpoint blocks the client; `1` means the first violation. | `vord:penaltyThreshold` |
+| `penaltyDuration` | How long the endpoint blocks the client: milliseconds, or an xsd:duration. | `vord:penaltyDuration` |
+| `identificationHeader` | For identification restrictions: the request header in which the client must identify, such as `'From'` or `'User-Agent'`. | `vord:identificationHeader` |
+| `identificationFormat` | For identification restrictions: `email` or `productWithContact`, or a VoRD identification format such as `vord:EmailAddress`. | `vord:identificationFormat` |
 
 IRIs may use the `vord:` prefix (`https://w3id.org/vord#`).
 
@@ -149,9 +153,11 @@ Comunica acts on these types of restrictions:
 | `concurrentRequests` | Concurrent requests | Sends at most `maxValue` requests at the same time. |
 | `resultSize` | Results per response | Requests results in pages of `maxValue` results (with `LIMIT` and `OFFSET`), so that they are not truncated. |
 | `responseTime` | Evaluation time in **seconds** | If `enforcement` is `reject`, requests time out after this time. |
-| `costModel`, `serverLoad`, `other` | | Nothing; they are only informative. |
+| `costModel` with a `windowDuration` (usage budget) | Cost units per `windowDuration` | Each request reserves one unit and waits until the budget can pay for it; the remaining budget that the endpoint reports in `httpSignalHeader` corrects the estimate. |
+| `identification` | | Sends the `clientContact` context entry in `identificationHeader`, only to this endpoint. |
+| `costModel` without a window, `serverLoad`, `other` | | Nothing; they are only informative. |
 
-For `rate`, `quota` and `concurrentRequests` restrictions, `returnsStatusCode` is added to the status codes that are retried,
+For `rate`, `quota`, `concurrentRequests` and usage budget restrictions, `returnsStatusCode` is added to the status codes that are retried (unless `penaltyThreshold` is 1),
 and `retryAfterHint` sets the delay before a retry, unless the context sets `httpRetryDelayFallback`.
 Retries only happen if the context sets `httpRetryCount`.
 By default, Comunica sends fewer requests than the limits allow, as a safety margin.
@@ -163,7 +169,8 @@ Restriction objects are checked before the query is executed, and the query fail
 * a field is unknown (e.g. a typo such as `windowduration`), or its value has the wrong type;
 * the `type` is missing and does not follow from the `metric`;
 * a `rate`, `quota`, `concurrentRequests`, `resultSize` or `responseTime` restriction has no `maxValue` above 0;
-* a `rate` or `quota` restriction has no `windowDuration`.
+* a `rate` or `quota` restriction has no `windowDuration`;
+* an `identification` restriction has no `identificationHeader` or `identificationFormat`.
   A restriction with metric `vord:requestsPerDay` and no window gets a window of one day.
 
 ### VoRD descriptions

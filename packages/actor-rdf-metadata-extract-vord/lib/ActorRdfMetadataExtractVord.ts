@@ -7,6 +7,7 @@ import { ActorRdfMetadataExtract } from '@comunica/bus-rdf-metadata-extract';
 import type { IActorTest, TestResult } from '@comunica/core';
 import { passTestVoid } from '@comunica/core';
 import type {
+  EndpointIdentificationFormat,
   EndpointRestrictionEnforcement,
   EndpointRestrictionType,
   IEndpointRestriction,
@@ -31,6 +32,7 @@ export class ActorRdfMetadataExtractVord extends ActorRdfMetadataExtract {
     [`${VORD}ServerLoadRestriction`]: 'serverLoad',
     [`${VORD}ConcurrentRequestsRestriction`]: 'concurrentRequests',
     [`${VORD}ResponseTimeRestriction`]: 'responseTime',
+    [`${VORD}IdentificationRestriction`]: 'identification',
   };
 
   public static readonly METRIC_TYPES: Record<string, EndpointRestrictionType> = {
@@ -39,6 +41,8 @@ export class ActorRdfMetadataExtractVord extends ActorRdfMetadataExtract {
     [`${VORD}resultBindings`]: 'resultSize',
     [`${VORD}evaluationTime`]: 'responseTime',
     [`${VORD}estimatedCostUnits`]: 'costModel',
+    [`${VORD}costUnitsPerWindow`]: 'costModel',
+    [`${VORD}concurrentRequests`]: 'concurrentRequests',
   };
 
   public static readonly ENFORCEMENTS: Record<string, EndpointRestrictionEnforcement> = {
@@ -47,6 +51,11 @@ export class ActorRdfMetadataExtractVord extends ActorRdfMetadataExtract {
     [`${VORD}QueueRequest`]: 'queue',
     [`${VORD}ThrottleResponse`]: 'throttle',
     [`${VORD}DegradeQuality`]: 'degrade',
+  };
+
+  public static readonly IDENTIFICATION_FORMATS: Record<string, EndpointIdentificationFormat> = {
+    [`${VORD}EmailAddress`]: 'email',
+    [`${VORD}ProductWithContact`]: 'productWithContact',
   };
 
   public static readonly DAY_MILLISECONDS = 24 * 60 * 60 * 1_000;
@@ -189,6 +198,18 @@ export class ActorRdfMetadataExtractVord extends ActorRdfMetadataExtract {
           break;
         case `${VORD}costModel`:
           restriction.costModel = value;
+          break;
+        case `${VORD}penaltyThreshold`:
+          restriction.penaltyThreshold = ActorRdfMetadataExtractVord.parseInteger(value);
+          break;
+        case `${VORD}penaltyDuration`:
+          restriction.penaltyDuration = ActorRdfMetadataExtractVord.parseDurationMilliseconds(value);
+          break;
+        case `${VORD}identificationHeader`:
+          restriction.identificationHeader = ActorRdfMetadataExtractVord.parseHeaderName(quad.object);
+          break;
+        case `${VORD}identificationFormat`:
+          restriction.identificationFormat = ActorRdfMetadataExtractVord.IDENTIFICATION_FORMATS[value] ?? 'other';
           break;
       }
     }

@@ -28,7 +28,7 @@ $ yarn add @comunica/actor-rdf-metadata-extract-vord
 
 This actor adds the following entries to the metadata object.
 
-* `restrictions`: A list of `IEndpointRestriction` objects (from `@comunica/types`), one per `vord:Restriction`. Durations (`vord:windowDuration`, `vord:retryAfterHint`) are converted to milliseconds, and `vord:requestsPerDay` restrictions without a window get a window of one day. This entry is only set if at least one restriction is found.
+* `restrictions`: A list of `IEndpointRestriction` objects (from `@comunica/types`), one per `vord:Restriction`. Durations (`vord:windowDuration`, `vord:retryAfterHint`, `vord:penaltyDuration`) are converted to milliseconds, and `vord:requestsPerDay` restrictions without a window get a window of one day. Header terms (`vord:httpSignalHeader`, `vord:identificationHeader`) become lowercase header names, taken from the local name of their IRI or from their literal. `vord:IdentificationRestriction`s get the type `identification`, with their `vord:identificationFormat` (`vord:EmailAddress` or `vord:ProductWithContact`); `vord:costUnitsPerWindow` and `vord:concurrentRequests` metrics imply the types `costModel` and `concurrentRequests`. This entry is only set if at least one restriction is found.
 
 ## Configure
 

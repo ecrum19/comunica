@@ -10,6 +10,7 @@ export type EndpointRestrictionType =
   'serverLoad' |
   'concurrentRequests' |
   'responseTime' |
+  'identification' |
   'other';
 
 /**
@@ -23,6 +24,30 @@ export type EndpointRestrictionEnforcement =
   'throttle' |
   'degrade' |
   'other';
+
+/**
+ * The format in which a client must identify itself,
+ * corresponding to the identification formats of the VoRD vocabulary:
+ * - `email`: an email address of the client's operator, as in the HTTP From header (vord:EmailAddress);
+ * - `productWithContact`: a product identifier with contact information in a comment,
+ *   as in the User-Agent value 'ExampleBot/1.0 (https://example.org; bot@example.org)' (vord:ProductWithContact).
+ */
+export type EndpointIdentificationFormat = 'email' | 'productWithContact' | 'other';
+
+/**
+ * Contact information with which the engine identifies itself to endpoints that require identification
+ * (VoRD identification restrictions). It is only sent to endpoints whose restrictions require it.
+ */
+export interface IClientContact {
+  /**
+   * An email address at which the operator of the engine can be reached.
+   */
+  email?: string;
+  /**
+   * A URL with information about the engine or its operator.
+   */
+  url?: string;
+}
 
 /**
  * An operational restriction of an endpoint, such as a rate limit or a maximum result size,
@@ -86,6 +111,23 @@ export interface IEndpointRestriction {
    * The IRI of the cost model that is used to interpret a cost model restriction.
    */
   costModel?: string;
+  /**
+   * The number of violations within the penalty duration after which the endpoint blocks the client.
+   * A value of 1 means that the first violation is penalized.
+   */
+  penaltyThreshold?: number;
+  /**
+   * The duration for which the endpoint blocks a client that reached the penalty threshold, in milliseconds.
+   */
+  penaltyDuration?: number;
+  /**
+   * For identification restrictions, the (lowercase) name of the HTTP request header in which clients must identify.
+   */
+  identificationHeader?: string;
+  /**
+   * For identification restrictions, the format of the identification.
+   */
+  identificationFormat?: EndpointIdentificationFormat;
 }
 
 /**
@@ -93,14 +135,16 @@ export interface IEndpointRestriction {
  * It has the same fields as {@link IEndpointRestriction}, with these differences:
  * - `type` is optional if it follows from the metric (e.g. `vord:requestsPerWindow` gives `rate`),
  *   and may also be a VoRD restriction class, such as `vord:RateRestriction`.
- * - `windowDuration` and `retryAfterHint` are either milliseconds or xsd:duration strings, such as `PT1M`.
+ * - `windowDuration`, `retryAfterHint` and `penaltyDuration` are either milliseconds or xsd:duration strings,
+ *   such as `PT1M`.
  * - `enforcement` may also be a VoRD enforcement mode, such as `vord:RejectRequest`.
+ * - `identificationFormat` may also be a VoRD identification format, such as `vord:EmailAddress`.
  * - IRIs of VoRD terms (`metric`, `unit`, `scope`, `costModel`) may use the `vord:` prefix.
  */
 export interface IEndpointRestrictionInput {
   /**
    * The kind of restriction: `rate`, `quota`, `resultSize`, `costModel`, `serverLoad`, `concurrentRequests`,
-   * `responseTime` or `other`, or a VoRD restriction class.
+   * `responseTime`, `identification` or `other`, or a VoRD restriction class.
    */
   type?: string;
   metric?: string;
@@ -125,6 +169,16 @@ export interface IEndpointRestrictionInput {
   enforcement?: string;
   hardRestriction?: boolean;
   costModel?: string;
+  penaltyThreshold?: number;
+  /**
+   * In milliseconds, or as an xsd:duration string.
+   */
+  penaltyDuration?: number | string;
+  identificationHeader?: string;
+  /**
+   * `email`, `productWithContact` or `other`, or a VoRD identification format.
+   */
+  identificationFormat?: string;
 }
 
 /**
